@@ -14,3 +14,9 @@ builder-debug.yml
 .env
 .env.*
 *.log
+
+# OS / Editor files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

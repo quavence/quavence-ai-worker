@@ -1,98 +1,76 @@
 # Quavence AI Worker Desktop
 
-Desktop shell for the Quavence AI worker agent:
-- configure worker token (stored in OS keychain)
-- connect to LM Studio or Ollama via Hub runtime policy
-- start/stop worker and view live activity
-- tray, autostart, and lifecycle controls
+Official desktop worker application for the **Quavence (QVNC)** DePIN AI Compute Network.
 
-## Lightweight Windows build
+Connect your local LLM (Ollama or LM Studio) to participate in decentralized compute tasks and earn native network rewards.
 
-The packaged app is a **worker shell only**. It does **not** bundle:
-- LM Studio
-- Ollama
-- model files (`.gguf`, caches)
-- dev tools / smoke scripts
-- local `.env`, tokens, or user config
+---
 
-Install LM Studio (or Ollama) and load Hub-approved models separately. Hub runtime policy remains the source of truth.
+## Key Features
 
-Default runtime endpoint for LM Studio: `http://localhost:1234/v1`  
-Default Hub API: `https://quavence.com`
+- **Decentralized AI Compute:** Executes consensus scoring, governance intelligence, and verification tasks locally.
+- **Local LLM Support:** Seamlessly integrates with Ollama and OpenAI-compatible runtimes (LM Studio).
+- **Secure Token Storage:** Node authentication tokens are stored securely in the OS Keychain (Windows Credential Manager / macOS Keychain).
+- **Hardware Attestation:** Automated multi-factor hardware and model runtime attestation.
+- **Background Daemon:** System tray controls, ambient background mode, and automated reconnects.
 
-The packaged app window title remains **Quavence AI Worker Desktop**; NSIS wizard and shortcuts use the shorter **Quavence AI Worker** name to avoid header clipping on localized Windows installs.
+---
 
-User config is written to Electron `userData/worker-config.json` after first run. Tokens stay in the OS keychain.
+## Quick Start (Pre-built Binaries)
 
-## Run (developer)
+For most users, simply download the latest installer from [GitHub Releases](https://github.com/quavence/quavence-ai-worker/releases):
+
+1. Download **`Quavence-AI-Worker-Setup-1.0.0.exe`**.
+2. Run the installer and launch the application.
+3. Paste your Worker Token obtained from the Quavence Dashboard.
+4. Ensure your local Ollama or LM Studio is running, and click **Start Worker**.
+
+---
+
+## Building from Source
+
+### Prerequisites
+
+- **Node.js:** v18.0.0 or higher
+- **Package Manager:** npm
+- **Local LLM Runtime:** Ollama (default `http://localhost:11434`) or LM Studio (default `http://localhost:1234/v1`)
+
+### Installation & Run
 
 ```bash
-cd worker_desktop
+# Clone the repository
+git clone https://github.com/quavence/quavence-ai-worker.git
+cd quavence-ai-worker
+
+# Install dependencies
 npm install
+
+# Run in development mode
 npm run dev
 ```
 
-## Icons (Logo1 — Worker AI)
-
-Tray/window icons use **Logo1** (not Logo5) so the worker is distinct from the Qt wallet.
+### Build Installers
 
 ```bash
-cd ../quavence_app
-python scripts/normalize_logo1.py
-python scripts/generate_icon_pack.py --deploy worker-desktop
-```
-
-Or from `worker_desktop` after normalization:
-
-```bash
-npm run generate:tray
-npm run preview:icons   # optional: assets/icon-preview.png
-```
-
-Source: `quavence_app/public/images/Logo1-centered-1024.png`
-
-Outputs: `assets/app.ico`, `assets/tray.ico`, `assets/app-icon.png`
-
-## Build Windows artifacts
-
-```bash
-cd worker_desktop
-npm install
+# Build production renderer UI
 npm run build:renderer
-npm run generate:tray
+
+# Build Windows NSIS Installer & Portable binary
 npm run dist:win
 ```
 
-Verify unpacked layout:
+Built artifacts will be generated in the `release/` directory:
+- `Quavence-AI-Worker-Setup-<version>.exe`
+- `Quavence-AI-Worker-Portable-<version>.exe`
 
-```bash
-npm run pack:dir
-npm run verify:dist
-```
+---
 
-Artifacts (`worker_desktop/release/`):
-- `Quavence-AI-Worker-Setup-<version>.exe` (NSIS installer)
-- `Quavence-AI-Worker-Portable-<version>.exe` (portable)
-- `win-unpacked/` (directory build for verification)
+## Security & Responsible Disclosure
 
-## Included in the artifact
+Security is a priority for the Quavence ecosystem. Please report any potential vulnerabilities to **security@quavence.com**. See [SECURITY.md](SECURITY.md) for details on our response SLAs and disclosure policy.
 
-- Electron main/preload/lifecycle modules
-- Renderer UI (`dist-renderer/`)
-- Worker agent (`agent/`)
-- Icons (`assets/app.ico`, `assets/tray.ico`, `assets/app-icon.png`)
-- Production dependency: `keytar`
+---
 
-## Excluded from the artifact
+## License
 
-- `tools/`, smoke scripts, dev scripts
-- Source maps
-- React sources (bundled into renderer build)
-- Bundled Ollama/runtime payloads
-- Repo-level `quavence-dao` files
-
-## Notes
-
-- App ID: `com.quavence.ai-worker`
-- Worker token is securely stored and isolated in your OS keychain.
-- `npm run verify:dist` checks forbidden paths and required packaged files after `pack:dir`.
+Licensed under the **Business Source License 1.1 (BSL-1.1)**. See [LICENSE](LICENSE) for terms.
