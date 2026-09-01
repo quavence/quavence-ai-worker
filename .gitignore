@@ -1,0 +1,16 @@
+# Dependencies
+node_modules/
+
+# Build and distribution artifacts
+dist/
+dist-renderer/
+release/
+build/
+*.exe
+*.blockmap
+builder-debug.yml
+
+# Environment and logs
+.env
+.env.*
+*.log

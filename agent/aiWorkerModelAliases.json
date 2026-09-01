@@ -1,0 +1,31 @@
+{
+  "qwen/qwen3-vl-8b": [
+    "qwen/qwen3-vl-8b",
+    "qwen3-vl-8b",
+    "qwen/qwen3-8b",
+    "qwen3-8b",
+    "qwen/qwen3-vl-8b-instruct",
+    "qwen/qwen3-vl-8b-gguf",
+    "qwen3-vl-8b-gguf",
+    "qwen/qwen3-vl-8b-instruct-gguf",
+    "lmstudio-community/qwen3-vl-8b-instruct-gguf",
+    "lmstudio-community/qwen3-vl-8b-gguf"
+  ],
+  "mistral-7b-instruct-v0.3": [
+    "mistral-7b-instruct-v0.3",
+    "mistral:7b-instruct-v0.3",
+    "mistralai/mistral-7b-instruct-v0.3",
+    "mistralai/mistral-7b-instruct-v0.3-gguf",
+    "mistral-7b-instruct-v0.3-gguf",
+    "thebloke/mistral-7b-instruct-v0.3-gguf",
+    "mistralai/mistral-7b-instruct-v0.3-q4_k_m",
+    "mistral-7b-instruct-v0.3-q4_k_m"
+  ],
+  "text-embedding-nomic-embed-text-v2-moe": [
+    "text-embedding-nomic-embed-text-v2-moe",
+    "nomic-embed-text-v2-moe",
+    "nomic-ai/text-embedding-nomic-embed-text-v2-moe",
+    "nomic-ai/text-embedding-nomic-embed-text-v2-moe-gguf",
+    "text-embedding-nomic-embed-text-v2-moe-gguf"
+  ]
+}

@@ -1,0 +1,111 @@
+{
+  "name": "quavence-ai-worker-desktop",
+  "version": "1.0.0",
+  "private": false,
+  "description": "Desktop launcher for Quavence AI Worker",
+  "author": "Quavence DAO",
+  "license": "BSL-1.1",
+  "main": "src/main.cjs",
+  "scripts": {
+    "dev": "npm run sync:model-aliases && concurrently -k \"npm:dev:renderer\" \"npm:dev:electron\"",
+    "dev:renderer": "vite",
+    "dev:electron": "wait-on tcp:5173 && cross-env ELECTRON_START_URL=http://localhost:5173 electron .",
+    "start": "npm run build:renderer && electron .",
+    "build:renderer": "vite build",
+    "generate:tray": "node scripts/generate_tray_icons.mjs",
+    "preview:icons": "node scripts/generate_tray_icons.mjs preview",
+    "sync:composer-llm": "node scripts/sync_composer_llm_service.mjs",
+    "sync:model-aliases": "node scripts/sync_model_aliases.mjs",
+    "pack:dir": "npm run sync:composer-llm && npm run sync:model-aliases && npm run build:renderer && npm run generate:tray && electron-builder --dir",
+    "dist:win": "npm run sync:composer-llm && npm run sync:model-aliases && npm run build:renderer && npm run generate:tray && electron-builder --win nsis portable",
+    "build:dir": "npm run pack:dir",
+    "build:win": "npm run dist:win",
+    "verify:dist": "node tools/verify_packaged_worker_artifact.mjs",
+    "smoke:installer-copy": "node tools/smoke_installer_copy.mjs",
+    "smoke:ipc": "node tools/smoke_ipc_handlers.mjs",
+    "smoke:lifecycle-start-idempotent": "node tools/smoke_lifecycle_start_idempotent.mjs"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.3.4",
+    "concurrently": "^9.1.2",
+    "cross-env": "^7.0.3",
+    "electron": "^31.7.7",
+    "electron-builder": "^24.13.3",
+    "png-to-ico": "^2.1.8",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "sharp": "^0.35.1",
+    "vite": "^5.4.18",
+    "wait-on": "^8.0.3"
+  },
+  "dependencies": {
+    "keytar": "^7.9.0"
+  },
+  "build": {
+    "appId": "com.quavence.ai-worker",
+    "productName": "Quavence AI Worker",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist-renderer/**/*",
+      "!dist-renderer/**/*.map",
+      "src/main.cjs",
+      "src/preload.cjs",
+      "src/externalUrlAllowlist.cjs",
+      "src/appLifecycle.cjs",
+      "src/workerHubErrorTaxonomy.cjs",
+      "src/workerHubErrorTaxonomy.mjs",
+      "src/workerStartGate.cjs",
+      "src/runtimePolicyShared.cjs",
+      "src/hubRequestShared.cjs",
+      "agent/**/*",
+      "package.json",
+      "!tools/**",
+      "!scripts/**",
+      "!**/*.map"
+    ],
+    "extraResources": [
+      {
+        "from": "assets",
+        "to": "assets",
+        "filter": [
+          "app.ico",
+          "tray.ico",
+          "app-icon.png"
+        ]
+      }
+    ],
+    "extraFiles": [
+      {
+        "from": "assets/app.ico",
+        "to": "QuavenceAIWorker-icon.ico"
+      }
+    ],
+    "asar": true,
+    "asarUnpack": [
+      "**/*.node"
+    ],
+    "win": {
+      "icon": "assets/app.ico",
+      "target": [
+        "nsis",
+        "portable"
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "artifactName": "Quavence-AI-Worker-Setup-${version}.${ext}",
+      "shortcutName": "Quavence AI Worker",
+      "uninstallDisplayName": "Quavence AI Worker ${version}",
+      "createDesktopShortcut": "always",
+      "installerIcon": "assets/app.ico",
+      "uninstallerIcon": "assets/app.ico",
+      "include": "build/installer.nsh"
+    },
+    "portable": {
+      "artifactName": "Quavence-AI-Worker-Portable-${version}.${ext}"
+    }
+  }
+}
