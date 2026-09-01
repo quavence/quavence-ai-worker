@@ -4,7 +4,7 @@
 
 Please do **NOT** create public GitHub issues for security vulnerabilities.
 
-Report security issues privately to: **security@quavence.com**
+Report security issues privately to: **connect@quavence.com**
 
 Include in your report:
 - Description of the vulnerability
