@@ -10,6 +10,10 @@ build/
 *.blockmap
 builder-debug.yml
 
+# Runtime binaries and temp files
+runtime/ollama/
+runtime/_tmp/
+
 # Environment and logs
 .env
 .env.*

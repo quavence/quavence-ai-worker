@@ -1823,6 +1823,17 @@ function createWindow() {
     return { action: 'deny' };
   });
 
+  mainWindow.webContents.on('will-navigate', (event, navigationUrl) => {
+    const parsed = String(navigationUrl || '').trim();
+    if (parsed.startsWith('file://') || parsed.startsWith('http://localhost') || parsed.startsWith('http://127.0.0.1')) {
+      return;
+    }
+    event.preventDefault();
+    if (isAllowedExternalUrl(parsed)) {
+      void shell.openExternal(parsed);
+    }
+  });
+
   const devServerUrl = process.env.ELECTRON_START_URL;
   if (!app.isPackaged && devServerUrl) {
     mainWindow.loadURL(devServerUrl);

@@ -1181,6 +1181,7 @@ export default function App() {
   }, [effectiveEmbedModel, selectedEmbedModel, policyEnforced]);
 
   const currentTask = useMemo(() => {
+    if (!status?.running) return null;
     const done = new Set();
     for (let i = logs.length - 1; i >= 0; i -= 1) {
       const line = String(logs[i] || '');
@@ -1195,12 +1196,18 @@ export default function App() {
         continue;
       }
       const claimed = line.match(/task claimed:\s*([a-f0-9-]+)\s*\(([^)]+)\)/i);
-      if (claimed && !done.has(claimed[1])) {
-        return { id: claimed[1], type: claimed[2] };
+      if (claimed) {
+        if (!done.has(claimed[1])) {
+          return { id: claimed[1], type: claimed[2] };
+        }
+        // Worker only runs one task at a time sequentially.
+        // If the latest claimed task has already completed or failed,
+        // the worker is idle. Do not scan back into past abandoned/orphaned tasks!
+        return null;
       }
     }
     return null;
-  }, [logs]);
+  }, [logs, status?.running]);
 
   useEffect(() => {
     if (!toastLogsSeededRef.current) {

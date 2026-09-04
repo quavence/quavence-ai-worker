@@ -59,6 +59,7 @@ const BOUNTY_SCREEN_PROMPT_KEY = 'TASK_BOUNTY_SUBMISSION_SCREEN';
 const BOUNTY_CONSULTANT_PROMPT_KEY = 'TASK_BOUNTY_REVIEW_CONSULTANT_TURN';
 const BOUNTY_COMPOSER_PROMPT_KEY = 'TASK_BOUNTY_COMPOSER_TURN';
 const RAG_IDLE_PROMPT_KEY = 'TASK_RAG_IDLE_VERIFICATION';
+const GLYPH_GEN_PROMPT_KEY = 'TASK_AI_GLYPH_GEN';
 const CONSULTANT_SEMANTIC_FLAGS = new Set([
   'off_topic',
   'wrong_deliverable',
@@ -79,6 +80,7 @@ const WORKER_EXECUTABLE_TASK_TYPES = new Set([
   BOUNTY_CONSULTANT_PROMPT_KEY,
   BOUNTY_COMPOSER_PROMPT_KEY,
   RAG_IDLE_PROMPT_KEY,
+  GLYPH_GEN_PROMPT_KEY,
   ...(FORCE_ALL_TASKS ? [HISTORICAL_PROMPT_KEY, OUTCOME_PROMPT_KEY] : []),
 ]);
 const RISK_FLAG_CODES = new Set([
@@ -1302,6 +1304,99 @@ async function buildTaskResult(task) {
       subtype: payload.subtype,
       ...parsed,
     });
+  }
+
+  // AI Glyph & NFT Art Generation
+  if (promptKey === GLYPH_GEN_PROMPT_KEY || task.task_type === GLYPH_GEN_PROMPT_KEY || payload.ai_glyph_task) {
+    const theme = String(payload.theme || 'Cybernetic Genesis Core');
+    const rarity = String(payload.rarity || 'Rare');
+    const edition = Number(payload.edition || 1000);
+    const seed = Number(payload.seed || 420911);
+    const creativePrompt = String(payload.creative_prompt || '').trim();
+    const instructions = String(payload.instructions || 'Generate a valid On-Chain vector SVG generative art glyph.');
+    const paletteStr = payload.palette ? (typeof payload.palette === 'object' ? JSON.stringify(payload.palette) : String(payload.palette)) : '';
+    const schemaStr = JSON.stringify(payload.expected_schema || {});
+
+    const glyphPrompt = [
+      'You are the Quavence Generative Art & On-Chain AI Glyph Worker.',
+      'Generate an intricate, authentic On-Chain SVG art glyph matching the requested creative directives and schema.',
+      'Output ONLY a valid JSON object matching the requested schema. No markdown fences, no explanatory text.',
+      '',
+      `THEME: "${theme}"`,
+      `RARITY: ${rarity}`,
+      `EDITION: #${edition}`,
+      `SEED: ${seed}`,
+      creativePrompt ? `CREATIVE DIRECTIVE: ${creativePrompt}` : '',
+      paletteStr ? `PALETTE: ${paletteStr}` : '',
+      '',
+      'INSTRUCTIONS:',
+      instructions,
+      '',
+      'EXPECTED JSON SCHEMA:',
+      schemaStr,
+      '',
+      'Return JSON matching schema:'
+    ].filter(Boolean).join('\n');
+
+    let modelText = '';
+    try {
+      modelText = await callLlm(glyphPrompt);
+    } catch (e) {
+      warn(`[Glyph Worker] LLM call error: ${e.message}, generating deterministic fallback glyph`);
+    }
+
+    let parsed = parseJsonCandidate(modelText, {});
+    let svg = typeof parsed?.svg_content === 'string' ? parsed.svg_content.trim() : '';
+
+    // If model didn't output valid SVG envelope, generate high-fidelity procedural SVG
+    if (!svg.startsWith('<svg') || !svg.endsWith('</svg>') || !/xmlns=['"]http:\/\/www\.w3\.org\/2000\/svg['"]/.test(svg)) {
+      const hue1 = (seed * 137) % 360;
+      const hue2 = (hue1 + 60) % 360;
+      const r1 = 80 + (seed % 60);
+      const r2 = 140 + (seed % 40);
+      const strokeW = 2 + (seed % 4);
+
+      svg = [
+        '<svg viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg">',
+        '  <defs>',
+        '    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">',
+        '      <stop offset="0%" stop-color="#07090E"/>',
+        '      <stop offset="100%" stop-color="#121824"/>',
+        '    </linearGradient>',
+        '    <linearGradient id="glyphGrad" x1="0%" y1="0%" x2="100%" y2="100%">',
+        `      <stop offset="0%" stop-color="hsl(${hue1}, 100%, 65%)"/>`,
+        `      <stop offset="100%" stop-color="hsl(${hue2}, 100%, 55%)"/>`,
+        '    </linearGradient>',
+        '    <filter id="glow" x="-20%" y="-20%" width="140%" height="140%">',
+        '      <feGaussianBlur stdDeviation="8" result="blur"/>',
+        '      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>',
+        '    </filter>',
+        '  </defs>',
+        '  <rect width="512" height="512" rx="32" fill="url(#bg)"/>',
+        `  <circle cx="256" cy="256" r="${r2}" fill="none" stroke="url(#glyphGrad)" stroke-width="${strokeW}" stroke-dasharray="12,8" opacity="0.4"/>`,
+        `  <polygon points="256,${256 - r1} ${256 + r1},256 256,${256 + r1} ${256 - r1},256" fill="none" stroke="url(#glyphGrad)" stroke-width="${strokeW + 1}" filter="url(#glow)"/>`,
+        `  <circle cx="256" cy="256" r="${Math.floor(r1 * 0.5)}" fill="none" stroke="url(#glyphGrad)" stroke-width="2"/>`,
+        `  <circle cx="256" cy="256" r="10" fill="hsl(${hue1}, 100%, 75%)" filter="url(#glow)"/>`,
+        `  <text x="256" y="470" text-anchor="middle" fill="#64748B" font-family="sans-serif" font-size="12" letter-spacing="4">QUAVENCE GENESIS #${edition}</text>`,
+        '</svg>'
+      ].join('\n');
+    }
+
+    const glyphHash = crypto.createHash('sha256').update(svg).digest('hex');
+    const title = parsed?.glyph_title || `Quavence Genesis ${theme.split(' ')[0]} #${edition}`;
+
+    return {
+      task_type: GLYPH_GEN_PROMPT_KEY,
+      glyph_title: title,
+      theme,
+      rarity,
+      edition,
+      seed,
+      svg_content: svg,
+      glyph_hash: glyphHash,
+      artist_notes: parsed?.artist_notes || `Procedurally attested on-chain glyph with seed ${seed}`,
+      completed_at: new Date().toISOString(),
+    };
   }
 
   if (!prompt) {

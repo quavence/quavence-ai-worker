@@ -134,13 +134,35 @@ function extractJsonObject(raw) {
   }
 }
 
-export function buildComposerLlmSystemPrompt() {
+export function buildComposerLlmSystemPrompt(input = null) {
+  if (input?.hints?.workspace === 'ai_glyphs') {
+    return [
+      'WHO YOU ARE:',
+      'You are the Quavence Glyph Art Consultant & Director in Task Composer.',
+      'Your role is to collaborate with DAO operators to design high-impact on-chain AI vector glyph series.',
+      'The operator may speak Russian or English. You translate their artistic vision, mood, theme, and brand lore into precision vector directives for DePIN GPU workers.',
+      '',
+      'CORE RESPONSIBILITIES:',
+      '1) CONVERSE: Speak in the operator\'s language (Russian if they write Russian, English if English). Be creative, inspiring, and concise.',
+      '2) FORMULATE ART DIRECTIVE: Propose:',
+      '   - title: Short, majestic series title (English, e.g. "Celestial Chrono Singularity", "Bioluminescent Abyssal Sigil").',
+      '   - theme: One of standard themes ("Cybernetic Genesis Core", "Minimalist Sacred Geometry", "Cyberpunk Samurai Crest", "Bioluminescent Deep Sea", "Ancient Cosmic Astrolabe", "Dark Matter Singularity", "PoUS Consensus Sigil", "Neural Quantum Nexus", "Celestial Chrono Matrix", "DePIN Worker Totem") OR a custom creative theme key (e.g. "Solar Punk Phoenix", "Gothic Neon Alchemy").',
+      '   - primaryColor: Neon / glowing primary hex code (e.g. #00F0FF, #FF0055, #FFB800, #00FF66, #7928CA).',
+      '   - accentColor: Harmonious secondary glow hex code (e.g. #7000FF, #00DFD8, #FF0080, #0070F3, #FFD700).',
+      '   - creativePrompt: A rich, vivid SVG prompt for DePIN GPU workers. Must instruct them on geometric symmetry, central totem/sigil, layered vector paths, intricate circuits or sacred lines, glowing neon gradients, dark futuristic background, and high aesthetic contrast.',
+      '3) OUTPUT FORMAT:',
+      'Return ONLY a valid JSON object in this exact shape:',
+      '{"mode":"draft","assistantMessage":"...concise explanation of the art direction in operator language...","draftPatch":{"title":{"text":"Series Title"},"task":{"text":"Art concept summary"},"art":{"title":"Series Title","theme":"Theme Key","primaryColor":"#00F0FF","accentColor":"#7000FF","creativePrompt":"Detailed SVG generation prompt for DePIN workers..."}},"followUpChips":[{"label":"Alternative Style 1"},{"label":"Alternative Style 2"}]}',
+      'Do not include markdown code blocks or additional text outside JSON.',
+    ].join('\n');
+  }
+
   return [
     'WHO YOU ARE:',
     'You are the Quavence Bounty Consultant in Task Composer.',
     'You do structured extraction from facts into draft sections — not freeform brief writing.',
     '',
-    'HARD CONTOUR:',
+    'HARD CONTOUR:',,
     '1) LANGUAGE SPLIT: assistantMessage + chip labels = first owner-message language; draft line text + chip values = English ONLY. Never put Russian (or mostly Cyrillic) text into draftPatch.title / task / deliverables / acceptance / proof — translate to English first. Product language may stay Russian: write it inside an English sentence (e.g. owner says «гайд на русском» → task "Write a short Telegram guide in Russian on how to submit a first Quavence bounty application.").',
     '2) FACTS ONLY: use only input.facts (+ confirmed lines). unknown → null section or gaps[]. ambiguous → gap. proven → suggested line with sourceFactIds.',
     '3) PROVENANCE: every draft line must be {text, sourceFactIds:[...fact ids]}. Lines without sourceFactIds are invalid.',
@@ -150,7 +172,7 @@ export function buildComposerLlmSystemPrompt() {
     '7) MODE: return mode "guidance" | "draft".',
     '   - guidance: operator still collecting a brief. Chips + asks only. No draft section fills, no taxonomy, no fake ready. Return 2–4 followUpChips (direction or fact asks) or an honest ask in assistantMessage.',
     '   - draft: facts describe hireable work. Extract into sections with sourceFactIds. Always include draftPatch.title when task is filled — a distinct short publishable title grounded in facts. Never return an empty draftPatch when user facts are substantial.',
-    '7b) DRAFT COMPLETENESS (draft mode only): when facts name concrete work products (models, scripts, reports, pipelines, dashboards, icons, files, assets), put each as a deliverables line with sourceFactIds. Do not stop after title+task+classification. If acceptance/proof are stated in facts (experience, links, screenshots, criteria), extract those lines. If absent, leave arrays empty and gaps[] — do NOT invent into draftPatch.',
+    '7b) DRAFT COMPLETENESS & SCOPE PRESERVATION (draft mode only): Extract concrete work products into deliverables[] with sourceFactIds without destructive summarization. When the owner brief enumerates specific categories, named items, endpoints, modules, or screens, each distinct group/category MUST be emitted as its own separate object entry in deliverables[] containing its item names and counts (e.g. `BASE (6 icons): First Step, First Submission, Active Participant, Task Enthusiast, First Approval, Consistent Quality`), rather than collapsing all groups into a single comma-separated sentence. Every named deliverable artifact from the facts must be preserved in the draft. If acceptance/proof are stated in facts (experience, links, screenshots, criteria), extract those lines. If absent, leave arrays empty and gaps[] — do NOT invent into draftPatch.',
     '7c) GAP PROPOSALS (draft mode): if acceptance/proof (or other reviewability gaps) remain open, return 1-3 followUpChips that HELP CLOSE HOLES for a reviewable bounty. Proposals MAY include reasonable completeness the operator did not state (format, size like 512×512, zip delivery, screenshots, style match) — that is the consultant job. REQUIRED per chip: label (owner language, short choice) + value (English draft line) + section. Section targeting: format/size/channel/package → deliverables; tone/style/quality bar → acceptance; submission evidence (screenshots of apply, links proving delivery) → proof. Examples: label "Размер 512", value "All icons delivered as PNG 512x512", section "deliverables"; label "Тон", value "Professional tone, no fluff", section "acceptance"; label "Скриншот", value "Attach screenshots of the published post", section "proof". NEVER What/How/Do you / "?". NEVER put those proposals into draftPatch until Confirm — chips are the proposal path. Do NOT offer contradictory options in the same turn (e.g. both "no transparency" and "transparent background") — pick one coherent set, or offer mutually exclusive alternatives as clearly competing choices without stacking opposites into one Confirm batch.',
     '8) CHIPS: concrete Confirm-able choices only — never open questions / Add-prompts / interrogatives. Chip labels = owner language; chip values = English draft lines (including completeness proposals). In guidance, direction labels only (no invent values into draft). Never ship generic placeholder values.',
     '9) CHAT: short dialogue, never retell the owner brief. Say what was filled vs still empty on the left only when draft mode actually filled something; never promise chips or draft fills that are absent. Never write English stubs like "What about", "Can we clarify", or "Draft updated. Check the sections".',
@@ -350,6 +372,15 @@ export function thinNormalizeComposerDraftPatch(draftPatch) {
       patch.classification = classification;
     }
   }
+  if (patch.art && typeof patch.art === 'object') {
+    patch.art = {
+      title: asCleanString(patch.art.title) || undefined,
+      theme: asCleanString(patch.art.theme) || undefined,
+      primaryColor: asCleanString(patch.art.primaryColor || patch.art.primary_color) || undefined,
+      accentColor: asCleanString(patch.art.accentColor || patch.art.accent_color) || undefined,
+      creativePrompt: asCleanString(patch.art.creativePrompt || patch.art.creative_prompt || patch.art.prompt) || undefined,
+    };
+  }
   return patch;
 }
 
@@ -370,9 +401,34 @@ export function sanitizeComposerAssistantMessage(assistantMessage, _latestUserMe
   return text;
 }
 
+export function extractArtDirectiveFromOutput(rawOutput) {
+  const patch = rawOutput?.draftPatch;
+  if (!patch?.art || typeof patch.art !== 'object') return null;
+  return {
+    title: String(patch.art.title || patch.title?.text || '').trim() || null,
+    theme: String(patch.art.theme || 'custom').trim(),
+    primaryColor: String(patch.art.primaryColor || patch.art.primary_color || '#00F0FF').trim(),
+    accentColor: String(patch.art.accentColor || patch.art.accent_color || '#7000FF').trim(),
+    creativePrompt: String(patch.art.creativePrompt || patch.art.creative_prompt || '').trim(),
+  };
+}
+
 export function buildComposerLlmUserPayload(input) {
-  const messages = input.messages || [];
+  const messages = input?.messages || [];
   const latestUserMessage = resolveLatestUserMessage(messages);
+
+  if (input?.hints?.workspace === 'ai_glyphs') {
+    return JSON.stringify(
+      {
+        latestUserMessage,
+        messages,
+        hints: input.hints || { workspace: 'ai_glyphs' },
+      },
+      null,
+      2,
+    );
+  }
+
   return JSON.stringify(
     {
       latestUserMessage,
@@ -532,6 +588,25 @@ export function normalizeComposerLlmTurnOutput(rawObject, options = {}) {
   for (const key of ['deliverables', 'acceptance', 'proof', 'outOfScope']) {
     const list = asProvenancedSuggestionList(patchIn[key], allowedFactIds, coerceDefaults);
     if (list && list.length) draftPatch[key] = list;
+  }
+
+  const artIn = patchIn.art || coerced.art;
+  if (artIn && typeof artIn === 'object') {
+    draftPatch.art = {
+      title: asCleanString(artIn.title || patchIn.title?.text || patchIn.title) || undefined,
+      theme: asCleanString(artIn.theme) || undefined,
+      primaryColor: asCleanString(artIn.primaryColor || artIn.primary_color) || undefined,
+      accentColor: asCleanString(artIn.accentColor || artIn.accent_color) || undefined,
+      creativePrompt: asCleanString(artIn.creativePrompt || artIn.creative_prompt || artIn.prompt) || undefined,
+    };
+  } else if (patchIn.creativePrompt || patchIn.creative_prompt) {
+    draftPatch.art = {
+      title: asCleanString(patchIn.title?.text || patchIn.title) || undefined,
+      theme: asCleanString(patchIn.theme) || undefined,
+      primaryColor: asCleanString(patchIn.primaryColor || patchIn.primary_color) || undefined,
+      accentColor: asCleanString(patchIn.accentColor || patchIn.accent_color) || undefined,
+      creativePrompt: asCleanString(patchIn.creativePrompt || patchIn.creative_prompt) || undefined,
+    };
   }
 
   if (Array.isArray(patchIn.gaps)) {
@@ -1139,10 +1214,19 @@ export function parseComposerLlmRawResponse(rawText, latestUserMessage = '', opt
     preferredMode: options.preferredMode || options.hints?.preferredMode,
     hints: options.hints,
   });
-  const nonEnglishDraftDrops = collectNonEnglishDraftDrops(normalized.draftPatch);
+  const isGlyphWorkspace = options.hints?.workspace === 'ai_glyphs';
+  const nonEnglishDraftDrops = isGlyphWorkspace ? [] : collectNonEnglishDraftDrops(normalized.draftPatch);
   const draftPatch = thinNormalizeComposerDraftPatch(normalized.draftPatch);
   const rawChips = Array.isArray(normalized.followUpChips) ? normalized.followUpChips : [];
-  const followUpChips = filterContourChips(rawChips, firstOwner);
+  const followUpChips = isGlyphWorkspace
+    ? rawChips
+        .filter((chip) => chip && (typeof chip === 'object' || typeof chip === 'string'))
+        .map((chip) => ({
+          label: String(chip?.label || chip || '').trim(),
+        }))
+        .filter((c) => c.label.length >= 2)
+        .slice(0, 6)
+    : filterContourChips(rawChips, firstOwner);
   const nonEnglishChipValuesDropped = rawChips.some((chip) => {
     const value = String(chip?.value || '').trim();
     return value && isMostlyNonEnglishDraftText(value);
@@ -1153,7 +1237,13 @@ export function parseComposerLlmRawResponse(rawText, latestUserMessage = '', opt
     || assistantEchoesAnyOwnerBrief(assistantMessage, messages, latestUserMessage)
     || assistantWrongLanguage(assistantMessage, firstOwner);
 
-  if (chipAnswer) {
+  if (isGlyphWorkspace) {
+    if (!assistantMessage || isWeakConsultantAck(assistantMessage)) {
+      assistantMessage = ownerUsesCyrillic(firstOwner)
+        ? 'Сформулировал арт-директиву для глифов. Проверьте карточку предложения и нажмите "Apply to Glyph Forge", чтобы передать параметры воркерам.'
+        : 'Formulated art directive for glyphs. Review the proposal card and click "Apply to Glyph Forge" to send to DePIN workers.';
+    }
+  } else if (chipAnswer) {
     const guidanceTurn =
       (options.preferredMode || options.hints?.preferredMode) === 'guidance';
     if (guidanceTurn) {
@@ -1187,6 +1277,19 @@ export function parseComposerLlmRawResponse(rawText, latestUserMessage = '', opt
 }
 
 function buildComposerTurnUserContent(input, latestUserMessage, extraTail = '') {
+  if (input?.hints?.workspace === 'ai_glyphs') {
+    return [
+      latestUserMessage
+        ? `OPERATOR CREATIVE BRIEF / REQUEST:\n${latestUserMessage}`
+        : '',
+      'CONTEXT (Glyph Series Creation):',
+      buildComposerLlmUserPayload(input),
+      'Reply with ONLY one valid JSON object. Propose series title, theme, primaryColor hex, accentColor hex, and a detailed creativePrompt for DePIN workers generating SVG vectors.',
+      extraTail,
+    ]
+      .filter(Boolean)
+      .join('\n\n');
+  }
   const openGaps = expectsDraftMode(input) ? hintsOpenGaps(input) : [];
   const openGapsNudge = buildOpenGapsNudge(openGaps);
   return [
@@ -1227,7 +1330,7 @@ export async function runComposerLlmTurn(input, options = {}) {
     facts: input.facts,
     preferredMode: input.hints?.preferredMode || input.preferredMode,
   };
-  const systemContent = buildComposerLlmSystemPrompt();
+  const systemContent = buildComposerLlmSystemPrompt(input);
   const chatMessages = [
     { role: 'system', content: systemContent },
     {
@@ -1243,8 +1346,9 @@ export async function runComposerLlmTurn(input, options = {}) {
 
   let output = parseComposerLlmRawResponse(raw, latestUserMessage, parseOptions);
   const firstOwner = resolveFirstUserMessage(input.messages) || latestUserMessage;
+  const isGlyphWorkspace = input?.hints?.workspace === 'ai_glyphs';
 
-  if (shouldRetryEnglishDraft(output)) {
+  if (!isGlyphWorkspace && shouldRetryEnglishDraft(output)) {
     const drops = Array.isArray(output.debug?.nonEnglishDraftDrops)
       ? output.debug.nonEnglishDraftDrops
       : [];
@@ -1289,7 +1393,7 @@ export async function runComposerLlmTurn(input, options = {}) {
   const skipGapRetryAfterEnglishReject =
     Boolean(output.debug?.englishDraftRetry) && !output.draftPatch?.task;
 
-  if (!skipGapRetryAfterEnglishReject && shouldRetryGapProposals(output, input)) {
+  if (!isGlyphWorkspace && !skipGapRetryAfterEnglishReject && shouldRetryGapProposals(output, input)) {
     const openGaps = resolveOpenContentGaps(output.draftPatch, input.sectionDraft);
     const previousJson = JSON.stringify({
       mode: output.mode,
@@ -1324,8 +1428,11 @@ export async function runComposerLlmTurn(input, options = {}) {
     );
   }
 
+  const artDirective = isGlyphWorkspace ? extractArtDirectiveFromOutput(output) : undefined;
+
   return {
     ...output,
+    ...(artDirective ? { artDirective } : {}),
     meta: {
       provider: injectedChat ? 'fixture' : config.provider,
       model: injectedChat ? 'fixture' : config.genModel,

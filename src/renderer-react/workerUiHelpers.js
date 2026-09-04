@@ -12,10 +12,11 @@ export function formatProviderLabel(provider) {
   return isOpenAiCompatProvider(provider) ? 'LM Studio' : 'Ollama';
 }
 
-/** TASK_BOUNTY_COMPOSER_TURN → Bounty Composer Turn */
+/** TASK_BOUNTY_COMPOSER_TURN → Task Composer Turn */
 export function formatTaskTypeLabel(raw) {
   const text = String(raw || '').trim();
   if (!text) return 'Task';
+  if (/^TASK_BOUNTY_COMPOSER/i.test(text)) return 'Task Composer Turn';
   const cleaned = text
     .replace(/^TASK[_-]+/i, '')
     .replace(/[_-]+/g, ' ')
