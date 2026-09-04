@@ -67,7 +67,7 @@ Built artifacts will be generated in the `release/` directory:
 
 ## Security & Responsible Disclosure
 
-Security is a priority for the Quavence ecosystem. Please report any potential vulnerabilities to **security@quavence.com**. See [SECURITY.md](SECURITY.md) for details on our response SLAs and disclosure policy.
+Security is a priority for the Quavence ecosystem. Please report any potential vulnerabilities to **connect@quavence.com**. See [SECURITY.md](SECURITY.md) for details on our response SLAs and disclosure policy.
 
 ---
 
