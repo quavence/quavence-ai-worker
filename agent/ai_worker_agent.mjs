@@ -37,7 +37,7 @@ const OPENAI_COMPAT_MODEL = String(
   process.env.AI_WORKER_LLM_MODEL || process.env.OLLAMA_MODEL || 'qwen/qwen3-vl-8b'
 ).trim();
 const OPENAI_COMPAT_API_KEY = String(process.env.AI_WORKER_LLM_API_KEY || '').trim();
-const OPENAI_COMPAT_MAX_TOKENS = Number(process.env.AI_WORKER_LLM_MAX_TOKENS || 2048);
+const OPENAI_COMPAT_MAX_TOKENS = Number(process.env.AI_WORKER_LLM_MAX_TOKENS || 4096);
 const OPENAI_COMPAT_ROLE_MODE = normalizeOpenAICompatRoleMode(process.env.AI_WORKER_OPENAI_COMPAT_ROLE_MODE);
 const OPENAI_COMPAT_JSON_SYSTEM_PROMPT =
   'Return only valid JSON. Do not include markdown fences, comments, or explanatory text.';
@@ -51,68 +51,6 @@ const OLLAMA_TIMEOUT_MS = Number(process.env.AI_WORKER_OLLAMA_TIMEOUT_MS || 1200
 const OLLAMA_MAX_RETRIES = Number(process.env.AI_WORKER_OLLAMA_MAX_RETRIES || 3);
 const TASK_EXECUTION_MAX_RETRIES = Number(process.env.AI_WORKER_TASK_EXECUTION_MAX_RETRIES || 2);
 
-const SUMMARY_PROMPT_KEY = 'TASK_SUMMARY';
-const RISK_PROMPT_KEY = 'TASK_RISK_FLAGS';
-const HISTORICAL_PROMPT_KEY = 'TASK_HISTORICAL_CONTEXT';
-const OUTCOME_PROMPT_KEY = 'TASK_OUTCOME_RECAP';
-const BOUNTY_SCREEN_PROMPT_KEY = 'TASK_BOUNTY_SUBMISSION_SCREEN';
-const BOUNTY_CONSULTANT_PROMPT_KEY = 'TASK_BOUNTY_REVIEW_CONSULTANT_TURN';
-const BOUNTY_COMPOSER_PROMPT_KEY = 'TASK_BOUNTY_COMPOSER_TURN';
-const RAG_IDLE_PROMPT_KEY = 'TASK_RAG_IDLE_VERIFICATION';
-const GLYPH_GEN_PROMPT_KEY = 'TASK_AI_GLYPH_GEN';
-const CONSULTANT_SEMANTIC_FLAGS = new Set([
-  'off_topic',
-  'wrong_deliverable',
-  'weak_evidence',
-  'incoherence',
-  'suspicious_proof',
-  'spam',
-  'missing_proof',
-]);
-
-const FORCE_ALL_TASKS = String(process.env.DEPIN_AI_CONSENSUS_FORCE_ALL_TASKS || '')
-  .trim()
-  .toLowerCase() === 'true';
-const WORKER_EXECUTABLE_TASK_TYPES = new Set([
-  SUMMARY_PROMPT_KEY,
-  RISK_PROMPT_KEY,
-  BOUNTY_SCREEN_PROMPT_KEY,
-  BOUNTY_CONSULTANT_PROMPT_KEY,
-  BOUNTY_COMPOSER_PROMPT_KEY,
-  RAG_IDLE_PROMPT_KEY,
-  GLYPH_GEN_PROMPT_KEY,
-  ...(FORCE_ALL_TASKS ? [HISTORICAL_PROMPT_KEY, OUTCOME_PROMPT_KEY] : []),
-]);
-const RISK_FLAG_CODES = new Set([
-  'MISSING_BUDGET_BREAKDOWN',
-  'UNCLEAR_DELIVERABLES',
-  'UNCLEAR_TIMELINE',
-  'NO_SUCCESS_METRICS',
-  'MISSING_TEAM_INFO',
-  'MISSING_PRIOR_WORK',
-  'DEPENDENCY_RISK',
-  'UNVERIFIED_ASSUMPTIONS',
-  'OVERLAPPING_SCOPE',
-  'INSUFFICIENT_RESOURCING',
-  'VAGUE_MILESTONES',
-  'MISSING_MAINTENANCE_PLAN',
-  'MISSING_RISK_MITIGATION',
-  'LARGE_UPFRONT_PAYMENT',
-  'UNCLEAR_OWNERSHIP',
-  'MISSING_EXTERNAL_QUOTES',
-  'LEGAL_OR_COMPLIANCE_RISK',
-  'SECURITY_RISK',
-  'CONFLICT_OF_INTEREST_RISK',
-  'NO_CONTINGENCY_PLAN',
-  'UNCLEAR_EXECUTION_TARGET',
-  'MISSING_EXECUTION_PROOF',
-  'PARITY_OR_AMOUNT_VALIDATION_REQUIRED',
-  'EXECUTION_UNCLEAR',
-  'INSUFFICIENT_SPEC'
-]);
-const RISK_SEVERITIES = new Set(['low', 'medium', 'high', 'critical']);
-const RISK_CATEGORIES = new Set(['observed_risk', 'missing_information', 'requires_manual_review']);
-
 let heartbeatTimer = null;
 let stopRequested = false;
 let deviceBindingStop = false;
@@ -125,12 +63,7 @@ let runtimePolicyFetchedAt = 0;
 let runtimeAttestation = null;
 let runtimePolicyBlocked = false;
 let runtimePolicyBlockReason = '';
-/**
- * Model id accepted by the local endpoint. LM Studio registers the same weights under
- * publisher/quant/format-specific ids, so requests must use its id, not the policy canonical.
- */
 let activeGenerationModel = OPENAI_COMPAT_MODEL;
-/** Hub rejected attestation on claim/complete — do not retry claim until policy/attestation changes. */
 let hubRuntimeAttestationRejected = false;
 let hubRuntimeAttestationRejectedVersion = '';
 
@@ -189,7 +122,7 @@ function collectHardwareFingerprint() {
   return crypto.createHash('sha256').update(parts.join('|') || 'fallback_hw').digest('hex');
 }
 
-const WORKER_HARDWARE_FINGERPRINT = collectHardwareFingerprint();
+const WORKER_HARDWARE_FINGERPRINT = String(process.env.AI_WORKER_HARDWARE_FINGERPRINT || '').trim() || collectHardwareFingerprint();
 
 function loadOrCreateDeviceId() {
   const fromEnv = String(process.env.AI_WORKER_DEVICE_ID || '').trim();
@@ -492,6 +425,7 @@ async function apiCall(method, pathName, body = null) {
         'Content-Type': 'application/json',
         Authorization: `Bearer ${NODE_TOKEN}`,
         'X-AI-Worker-Device-ID': WORKER_DEVICE_ID,
+        'X-AI-Worker-Hardware-Fingerprint': WORKER_HARDWARE_FINGERPRINT,
       },
       body,
       { timeoutMs: HUB_REQUEST_TIMEOUT_MS },
@@ -521,7 +455,8 @@ function getOllamaBackoffMs(attempt) {
   return Math.min(2000 * attempt, 8000);
 }
 
-async function callOllamaOnce(prompt) {
+async function callOllamaOnce(prompt, options = {}) {
+  const system = options.systemPrompt || undefined;
   const res = await requestJson(
     'POST',
     `${OLLAMA_BASE_URL}/api/generate`,
@@ -530,10 +465,11 @@ async function callOllamaOnce(prompt) {
       model: OLLAMA_MODEL,
       stream: false,
       prompt,
+      ...(system ? { system } : {}),
       options: {
-        temperature: 0,
+        temperature: options.temperature !== undefined ? options.temperature : 0,
         top_p: 1,
-        num_predict: 1024
+        num_predict: options.max_tokens || 2048,
       }
     },
     OLLAMA_TIMEOUT_MS
@@ -556,11 +492,11 @@ async function callOllamaOnce(prompt) {
   return text;
 }
 
-async function callOllama(prompt) {
+async function callOllama(prompt, options = {}) {
   let lastError = null;
   for (let attempt = 1; attempt <= OLLAMA_MAX_RETRIES; attempt += 1) {
     try {
-      return await callOllamaOnce(prompt);
+      return await callOllamaOnce(prompt, options);
     } catch (error) {
       lastError = error;
       if (!isTransientNetworkError(error) || attempt >= OLLAMA_MAX_RETRIES) {
@@ -635,7 +571,6 @@ function setActiveGenerationModel(modelId, reason = '') {
   return true;
 }
 
-/** Ask the endpoint which id it exposes for the configured model. */
 async function resolveGenerationModelFromEndpoint(reason = '') {
   if (LLM_PROVIDER !== 'openai_compat') return false;
   try {
@@ -655,7 +590,7 @@ async function resolveGenerationModelFromEndpoint(reason = '') {
   }
 }
 
-async function callOpenAICompatOnce(prompt) {
+async function callOpenAICompatOnce(prompt, options = {}) {
   const baseUrl = normalizeOpenAICompatBaseUrl(OPENAI_COMPAT_BASE_URL);
   const headers = { 'Content-Type': 'application/json' };
   if (OPENAI_COMPAT_API_KEY) {
@@ -663,6 +598,7 @@ async function callOpenAICompatOnce(prompt) {
   }
 
   const userPrompt = String(prompt || '');
+  const systemPrompt = options.systemPrompt || OPENAI_COMPAT_JSON_SYSTEM_PROMPT;
   let useSystemRole = OPENAI_COMPAT_ROLE_MODE !== 'user_only';
   let withResponseFormat = true;
   let responseFormatRetryDone = false;
@@ -671,11 +607,13 @@ async function callOpenAICompatOnce(prompt) {
 
   const buildPayload = () => ({
     model: activeGenerationModel,
-    messages: buildOpenAICompatMessages(OPENAI_COMPAT_JSON_SYSTEM_PROMPT, userPrompt, useSystemRole),
+    messages: buildOpenAICompatMessages(systemPrompt, userPrompt, useSystemRole),
     ...(withResponseFormat ? { response_format: { type: 'json_object' } } : {}),
-    temperature: 0,
+    temperature: options.temperature !== undefined ? options.temperature : 0,
     top_p: 1,
-    max_tokens: OPENAI_COMPAT_MAX_TOKENS,
+    ...(options.presence_penalty !== undefined ? { presence_penalty: options.presence_penalty } : {}),
+    ...(options.frequency_penalty !== undefined ? { frequency_penalty: options.frequency_penalty } : {}),
+    max_tokens: options.max_tokens || OPENAI_COMPAT_MAX_TOKENS,
     stream: false
   });
 
@@ -741,11 +679,11 @@ async function callOpenAICompatOnce(prompt) {
   throw new Error('OpenAI-compatible request failed');
 }
 
-async function callOpenAICompat(prompt) {
+async function callOpenAICompat(prompt, options = {}) {
   let lastError = null;
   for (let attempt = 1; attempt <= OLLAMA_MAX_RETRIES; attempt += 1) {
     try {
-      return await callOpenAICompatOnce(prompt);
+      return await callOpenAICompatOnce(prompt, options);
     } catch (error) {
       lastError = error;
       if (!isTransientNetworkError(error) || attempt >= OLLAMA_MAX_RETRIES) {
@@ -758,23 +696,11 @@ async function callOpenAICompat(prompt) {
   throw lastError || new Error('openai_compat request failed');
 }
 
-async function callLlm(prompt) {
+async function callLlm(prompt, options = {}) {
   if (LLM_PROVIDER === 'openai_compat') {
-    return callOpenAICompat(prompt);
+    return callOpenAICompat(prompt, options);
   }
-  return callOllama(prompt);
-}
-
-function parseJsonCandidate(text, fallback = {}) {
-  const fenced = text.match(/```json\s*([\s\S]*?)```/i);
-  const rawCandidate = (fenced ? fenced[1] : text || '').trim();
-  const candidate = extractLikelyJsonObject(rawCandidate) || rawCandidate;
-  try {
-    const parsed = JSON.parse(candidate);
-    return parsed && typeof parsed === 'object' ? parsed : fallback;
-  } catch {
-    return fallback;
-  }
+  return callOllama(prompt, options);
 }
 
 function extractLikelyJsonObject(text) {
@@ -819,174 +745,60 @@ function extractLikelyJsonObject(text) {
   return '';
 }
 
-function normalizeStringArray(value) {
-  if (!Array.isArray(value)) return [];
-  return value.map((item) => String(item).trim()).filter(Boolean).slice(0, 10);
-}
-
-function normalizeStringArrayForSubmit(value, maxItems = 20, maxLength = 280) {
-  if (!Array.isArray(value)) return [];
-  return value
-    .map((item) => String(item || '').trim())
-    .filter(Boolean)
-    .map((item) => item.slice(0, maxLength))
-    .slice(0, maxItems);
-}
-
-function normalizeRiskFlags(value) {
-  if (!Array.isArray(value)) return [];
-  return value
-    .map((item) => {
-      const code = String(item?.code || '').trim().toUpperCase();
-      const severity = String(item?.severity || '').trim().toLowerCase();
-      const category = String(item?.category || '').trim().toLowerCase();
-      const confidence = Number(item?.confidence);
-      const evidence = Array.isArray(item?.evidence)
-        ? item.evidence
-          .map((entry) => ({
-            quote: String(entry?.quote || '').trim().slice(0, 320),
-            section: String(entry?.section || '').trim().slice(0, 120) || undefined
-          }))
-          .filter((entry) => entry.quote.length > 0)
-          .slice(0, 4)
-        : [];
-      return {
-        code,
-        title: String(item?.title || '').trim().slice(0, 120) || code,
-        severity: RISK_SEVERITIES.has(severity) ? severity : 'medium',
-        category: RISK_CATEGORIES.has(category) ? category : 'missing_information',
-        confidence: Number.isFinite(confidence) ? Math.max(0, Math.min(1, confidence)) : 0.5,
-        description: String(item?.description || '').trim().slice(0, 260),
-        why_it_matters: String(item?.why_it_matters || '').trim().slice(0, 240),
-        evidence,
-        missing_data: normalizeStringArrayForSubmit(item?.missing_data, 6, 120),
-        suggested_question: String(item?.suggested_question || '').trim().slice(0, 220)
-      };
-    })
-    .filter((item) => item.code && RISK_FLAG_CODES.has(item.code))
-    .filter((item) => item.evidence.length > 0)
-    .map((item) => ({
-      code: item.code,
-      title: item.title,
-      severity: item.severity,
-      category: item.category,
-      confidence: item.confidence,
-      description: item.description,
-      why_it_matters: item.why_it_matters,
-      evidence: item.evidence,
-      missing_data: item.missing_data,
-      suggested_question: item.suggested_question
-    }))
-    .slice(0, 10);
-}
-
-function normalizeHistoricalSimilarProposals(value) {
-  if (!Array.isArray(value)) return [];
-  return value
-    .map((item) => {
-      const similarity = Number(item?.similarity);
-      const rawOutcome = String(item?.outcome || '').toLowerCase();
-      return {
-        proposal_id: String(item?.proposal_id || '').trim(),
-        similarity: Number.isFinite(similarity) ? Math.max(0, Math.min(1, similarity)) : 0,
-        outcome: ['passed', 'failed', 'unknown'].includes(rawOutcome) ? rawOutcome : 'unknown'
-      };
-    })
-    .filter((item) => item.proposal_id)
-    .slice(0, 20);
-}
-
-function isValidParsedForPromptKey(promptKey, parsed) {
-  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return false;
-
-  if (promptKey === SUMMARY_PROMPT_KEY) {
-    return typeof parsed.summary === 'string' || Array.isArray(parsed.positive_factors) || Array.isArray(parsed.recommendations);
-  }
-
-  if (promptKey === RISK_PROMPT_KEY) {
-    return (
-      typeof parsed.risk_level === 'string' ||
-      typeof parsed.confidence === 'string' ||
-      Array.isArray(parsed.risk_flags) ||
-      Array.isArray(parsed.questions_to_author) ||
-      Array.isArray(parsed.evidence_gaps)
-    );
-  }
-
-  if (promptKey === HISTORICAL_PROMPT_KEY) {
-    return Array.isArray(parsed.similar_proposals);
-  }
-
-  if (promptKey === BOUNTY_SCREEN_PROMPT_KEY) {
-    const recommendation = String(parsed.recommendation || '').trim().toLowerCase();
-    return (
-      typeof parsed.summary === 'string'
-      && (typeof parsed.pass === 'boolean' || parsed.pass === 'true' || parsed.pass === 'false')
-      && ['needs_review', 'likely_complete', 'insufficient_proof'].includes(recommendation)
-    );
-  }
-
-  if (promptKey === BOUNTY_CONSULTANT_PROMPT_KEY) {
-    return typeof parsed.assistantMessage === 'string' && parsed.assistantMessage.trim().length > 0;
-  }
-
-  if (promptKey === BOUNTY_COMPOSER_PROMPT_KEY) {
-    return typeof parsed.assistantMessage === 'string' && parsed.assistantMessage.trim().length > 0;
-  }
-
-  if (promptKey === RAG_IDLE_PROMPT_KEY) {
-    return (
-      typeof parsed === 'object'
-      && parsed !== null
-      && (
-        'question' in parsed ||
-        'answer' in parsed ||
-        'primary_topic' in parsed ||
-        'coherence_score' in parsed ||
-        'completeness_score' in parsed ||
-        'clarity_score' in parsed ||
-        'assessment' in parsed
-      )
-    );
-  }
-
-  return true;
-}
-
-function buildRiskRepairPrompt(sourcePrompt, brokenOutput) {
-  return [
-    'You repair governance-risk output into strict JSON.',
-    'Return ONLY a valid JSON object with keys:',
-    'risk_level, confidence, risk_flags, questions_to_author, evidence_gaps.',
-    'Each risk_flags item must include: code, title, severity, category, confidence, description, why_it_matters, evidence[], missing_data[], suggested_question.',
-    'Use ONLY facts from SOURCE_PROMPT and keep exact evidence quotes.',
-    'If no valid evidence quote exists for a risk, drop that risk.',
-    '',
-    'SOURCE_PROMPT:',
-    String(sourcePrompt || ''),
-    '',
-    'BROKEN_MODEL_OUTPUT:',
-    String(brokenOutput || '')
-  ].join('\n');
-}
-
-async function recoverRiskParsed(sourcePrompt, brokenOutput) {
+function parseJsonCandidate(text, fallback = null) {
+  const fenced = text.match(/```json\s*([\s\S]*?)```/i);
+  const rawCandidate = (fenced ? fenced[1] : text || '').trim();
+  const candidate = extractLikelyJsonObject(rawCandidate) || rawCandidate;
   try {
-    const repairedText = await callLlm(buildRiskRepairPrompt(sourcePrompt, brokenOutput));
-    const repaired = parseJsonCandidate(repairedText, {});
-    if (isValidParsedForPromptKey(RISK_PROMPT_KEY, repaired)) {
-      return repaired;
-    }
-  } catch (error) {
-    warn(`risk repair failed: ${error.message}`);
+    const parsed = JSON.parse(candidate);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : fallback;
+  } catch {
+    return fallback;
   }
-  return {
-    risk_level: 'medium',
-    confidence: 'low',
-    risk_flags: [],
-    questions_to_author: [],
-    evidence_gaps: []
-  };
+}
+
+/**
+ * Universal Dumb Runner: executes pre-assembled prompt received from Hub.
+ * The worker is a pure inference relay with zero client-side prompt stitching or schema dicts.
+ */
+async function executeTask(task) {
+  const taskId = task?.id;
+  const userPrompt = String(
+    task?.prompt ||
+    task?.result_json?.prompt ||
+    ''
+  ).trim();
+
+  const systemPrompt = String(
+    task?.system_prompt ||
+    task?.result_json?.system_prompt ||
+    OPENAI_COMPAT_JSON_SYSTEM_PROMPT
+  ).trim();
+
+  if (!userPrompt) {
+    warn(`task ${taskId} has no prompt payload; skipping`);
+    return {
+      worker_notice: 'No prompt payload found in task',
+      task_type: task?.task_type,
+      completed_at: new Date().toISOString(),
+    };
+  }
+
+  const modelText = await callLlm(userPrompt, { systemPrompt });
+  let parsed = parseJsonCandidate(modelText, null);
+
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    // Fallback: wrap raw text in summary so Hub's resilient normalizer handles it
+    parsed = { summary: String(modelText || '').trim().slice(0, 4000) };
+  }
+
+  // Backward compat: pass turn_input if provided
+  const turnInput = task?.turn_input || task?.result_json?.turn_input;
+  if (turnInput && typeof turnInput === 'object' && !parsed.turn_input) {
+    parsed.turn_input = turnInput;
+  }
+
+  return parsed;
 }
 
 function isPlainObject(value) {
@@ -1025,463 +837,11 @@ function makeIdempotencyKey() {
   return crypto.randomBytes(16).toString('hex');
 }
 
-function filterConsultantProvenancedLines(lines, maxItems = 8) {
-  if (!Array.isArray(lines)) return [];
-  return lines
-    .map((item) => {
-      if (!item || typeof item !== 'object') return null;
-      const text = String(item.text || item.value || '').trim().slice(0, 400);
-      const sourceCheckIds = Array.isArray(item.sourceCheckIds || item.source_check_ids)
-        ? (item.sourceCheckIds || item.source_check_ids)
-          .map((id) => String(id || '').trim())
-          .filter(Boolean)
-        : [];
-      if (!text || !sourceCheckIds.length) return null;
-      return { text, sourceCheckIds };
-    })
-    .filter(Boolean)
-    .slice(0, maxItems);
-}
-
-function normalizeConsultantTurnForSubmit(payload) {
-  const semanticFlags = normalizeStringArrayForSubmit(payload.semanticFlags || payload.semantic_flags, 8, 64)
-    .map((flag) => String(flag).trim().toLowerCase())
-    .filter((flag) => CONSULTANT_SEMANTIC_FLAGS.has(flag));
-  const revisionDeltaSummary = String(payload.revisionDeltaSummary || payload.revision_delta_summary || '')
-    .trim()
-    .slice(0, 1200);
-  return {
-    assistantMessage: String(payload.assistantMessage || payload.assistant_message || '').trim().slice(0, 4000),
-    semanticFlags,
-    gaps: Array.isArray(payload.gaps) ? payload.gaps.slice(0, 12) : [],
-    followUpChips: Array.isArray(payload.followUpChips || payload.follow_up_chips)
-      ? (payload.followUpChips || payload.follow_up_chips).slice(0, 6)
-      : [],
-    requestChangeDraft: filterConsultantProvenancedLines(
-      payload.requestChangeDraft || payload.request_change_draft,
-      8,
-    ),
-    requestChangeDraftGrouped: Array.isArray(payload.requestChangeDraftGrouped || payload.request_change_draft_grouped)
-      ? (payload.requestChangeDraftGrouped || payload.request_change_draft_grouped).slice(0, 4)
-      : [],
-    notesPatch: filterConsultantProvenancedLines(payload.notesPatch || payload.notes_patch, 8),
-    suggestedQuestions: normalizeStringArrayForSubmit(
-      payload.suggestedQuestions || payload.suggested_questions,
-      8,
-      280,
-    ),
-    ...(revisionDeltaSummary ? { revisionDeltaSummary } : {}),
-  };
-}
-
-/** Pass-through of hub composer turn (already parsed/retried by runComposerLlmTurn). */
-function normalizeComposerTurnForSubmit(payload) {
-  const assistantMessage = String(payload?.assistantMessage || payload?.assistant_message || '').trim();
-  if (!assistantMessage) {
-    throw new Error('composer_empty_assistant_message');
-  }
-  return {
-    mode: String(payload?.mode || '').trim().toLowerCase() === 'guidance' ? 'guidance' : 'draft',
-    assistantMessage,
-    draftPatch: payload?.draftPatch && typeof payload.draftPatch === 'object' ? payload.draftPatch : {},
-    followUpChips: Array.isArray(payload?.followUpChips)
-      ? payload.followUpChips
-      : (Array.isArray(payload?.follow_up_chips) ? payload.follow_up_chips : []),
-    ...(payload?.meta && typeof payload.meta === 'object' ? { meta: payload.meta } : {}),
-  };
-}
-
-async function importComposerLlmService() {
-  const candidates = [
-    // Packaged Electron: service is copied next to the agent inside app.asar
-    new URL('./bountyComposerLlmService.js', import.meta.url),
-    // Monorepo / unpackaged: repo-root hub service
-    new URL('../../src/services/bountyComposerLlmService.js', import.meta.url),
-  ];
-  let lastError = null;
-  for (const serviceUrl of candidates) {
-    try {
-      return await import(serviceUrl.href);
-    } catch (error) {
-      lastError = error;
-      const message = String(error?.message || error || '');
-      const code = String(error?.code || '');
-      const missing = code === 'ERR_MODULE_NOT_FOUND' || /Cannot find module/i.test(message);
-      if (!missing) throw error;
-    }
-  }
-  throw lastError || new Error('composer_llm_service_unavailable');
-}
-
-async function buildComposerTurnViaHubService(payload) {
-  const turnInput = payload?.turn_input || payload?.turnInput;
-  if (!turnInput || typeof turnInput !== 'object') {
-    throw new Error('composer_turn_input_missing');
-  }
-
-  const { runComposerLlmTurn } = await importComposerLlmService();
-  const turn = await runComposerLlmTurn(turnInput, {
-    completeChat: async ({ messages }) => {
-      const prompt = (Array.isArray(messages) ? messages : [])
-        .map((message) => {
-          const role = String(message?.role || 'user').toUpperCase();
-          return `${role}:\n${String(message?.content || '').trim()}`;
-        })
-        .filter((line) => line.replace(/^(SYSTEM|USER|ASSISTANT):\n?/i, '').trim().length > 0)
-        .join('\n\n');
-      if (!prompt.trim()) {
-        throw new Error('composer_empty_chat_messages');
-      }
-      return callLlm(prompt);
-    },
-  });
-  return normalizeComposerTurnForSubmit(turn);
-}
-
-function normalizeResultForSubmit(taskType, resultJson) {
-  const payload = resultJson && typeof resultJson === 'object' ? resultJson : {};
-
-  if (taskType === SUMMARY_PROMPT_KEY) {
-    const summary = String(payload.summary || '').trim();
-    return {
-      summary: summary.slice(0, 4000),
-      positive_factors: normalizeStringArrayForSubmit(payload.positive_factors, 20, 280),
-      recommendations: normalizeStringArrayForSubmit(payload.recommendations, 20, 280)
-    };
-  }
-
-  if (taskType === RISK_PROMPT_KEY) {
-    const riskLevelRaw = String(payload.risk_level || '').trim().toLowerCase();
-    const confidenceRaw = String(payload.confidence || '').trim().toLowerCase();
-    const riskLevel = ['low', 'medium', 'high'].includes(riskLevelRaw) ? riskLevelRaw : 'medium';
-    const confidence = ['low', 'medium', 'high'].includes(confidenceRaw) ? confidenceRaw : 'medium';
-    const riskFlags = normalizeRiskFlags(payload.risk_flags);
-    return {
-      risk_level: riskLevel,
-      confidence,
-      risk_flags: riskFlags,
-      questions_to_author: normalizeStringArrayForSubmit(payload.questions_to_author, 20, 280),
-      evidence_gaps: normalizeStringArrayForSubmit(payload.evidence_gaps, 20, 280)
-    };
-  }
-
-  if (taskType === HISTORICAL_PROMPT_KEY) {
-    const similarProposals = Array.isArray(payload.similar_proposals)
-      ? payload.similar_proposals
-        .map((item) => {
-          const proposalId = String(item?.proposal_id || '').trim().slice(0, 128);
-          const similarity = Number(item?.similarity);
-          const outcomeRaw = String(item?.outcome || '').trim().toLowerCase();
-          const outcome = ['passed', 'failed', 'unknown'].includes(outcomeRaw) ? outcomeRaw : 'unknown';
-          return {
-            proposal_id: proposalId,
-            similarity: Number.isFinite(similarity) ? Math.max(0, Math.min(1, similarity)) : 0,
-            outcome
-          };
-        })
-        .filter((item) => item.proposal_id.length > 0)
-        .slice(0, 30)
-      : [];
-    return { similar_proposals: similarProposals };
-  }
-
-  if (taskType === BOUNTY_SCREEN_PROMPT_KEY) {
-    const recommendationRaw = String(payload.recommendation || 'needs_review').trim().toLowerCase();
-    const recommendation = ['needs_review', 'likely_complete', 'insufficient_proof'].includes(recommendationRaw)
-      ? recommendationRaw
-      : 'needs_review';
-    const confidenceNum = Number(payload.confidence);
-    const confidence = Number.isFinite(confidenceNum)
-      ? Math.max(0, Math.min(1, confidenceNum))
-      : 0.5;
-    return {
-      pass: Boolean(payload.pass),
-      flags: normalizeStringArrayForSubmit(payload.flags, 12, 64),
-      confidence,
-      summary: String(payload.summary || '').trim().slice(0, 4000),
-      missing: normalizeStringArrayForSubmit(payload.missing, 12, 280),
-      suggested_questions: normalizeStringArrayForSubmit(payload.suggested_questions, 12, 280),
-      recommendation,
-    };
-  }
-
-  if (taskType === BOUNTY_CONSULTANT_PROMPT_KEY) {
-    return normalizeConsultantTurnForSubmit(payload);
-  }
-
-  if (taskType === BOUNTY_COMPOSER_PROMPT_KEY) {
-    return normalizeComposerTurnForSubmit(payload);
-  }
-
-  if (taskType === RAG_IDLE_PROMPT_KEY) {
-    const subtype = String(payload.subtype || '').trim();
-    if (subtype === 'qa_pair_gen' || (!subtype && ('question' in payload || 'answer' in payload))) {
-      const question = String(payload.question || payload.q || 'What is the key point in this knowledge section?').trim();
-      const answer = String(payload.answer || payload.a || 'The section outlines standard protocol parameters and verification procedures.').trim();
-      const rawConfidence = Number(payload.confidence);
-      const confidence = Number.isFinite(rawConfidence) && rawConfidence >= 0 && rawConfidence <= 1 ? rawConfidence : 0.95;
-      return {
-        question: question.length >= 5 ? question : 'What is the key point in this knowledge section?',
-        answer: answer.length >= 10 ? answer : 'The section outlines standard protocol parameters and verification procedures.',
-        confidence,
-      };
-    }
-    if (subtype === 'embed_verify' || (!subtype && 'primary_topic' in payload)) {
-      const primaryTopic = String(payload.primary_topic || 'Protocol Architecture').trim();
-      const keyConcepts = Array.isArray(payload.key_concepts)
-        ? payload.key_concepts.map((k) => String(k).trim()).filter(Boolean).slice(0, 5)
-        : ['Quavence Protocol', 'PoUS Verification'];
-      const isSelfContained = payload.is_self_contained !== undefined ? Boolean(payload.is_self_contained) : true;
-      const rawScore = Number(payload.coherence_score);
-      const coherenceScore = Number.isFinite(rawScore) && rawScore >= 0 && rawScore <= 1 ? rawScore : 0.95;
-      return {
-        primary_topic: primaryTopic || 'Protocol Architecture',
-        key_concepts: keyConcepts.length > 0 ? keyConcepts : ['Quavence Protocol', 'PoUS Verification'],
-        is_self_contained: isSelfContained,
-        coherence_score: coherenceScore,
-      };
-    }
-    if (subtype === 'chunk_coherence' || (!subtype && ('completeness_score' in payload || 'clarity_score' in payload))) {
-      const rawCompleteness = Number(payload.completeness_score);
-      const rawClarity = Number(payload.clarity_score);
-      const completenessScore = Number.isFinite(rawCompleteness) && rawCompleteness >= 0 && rawCompleteness <= 1 ? rawCompleteness : 0.95;
-      const clarityScore = Number.isFinite(rawClarity) && rawClarity >= 0 && rawClarity <= 1 ? rawClarity : 0.95;
-      const suggestedHeading = String(payload.suggested_heading || 'Protocol Architecture').trim();
-      const notes = String(payload.notes || 'Verified chunk integrity.').trim();
-      return {
-        completeness_score: completenessScore,
-        clarity_score: clarityScore,
-        suggested_heading: suggestedHeading || 'Protocol Architecture',
-        ...(notes ? { notes } : {}),
-      };
-    }
-    return canonicalize(payload);
-  }
-
-  return canonicalize(payload);
-}
-
-async function buildTaskResult(task) {
-  const payload = task?.result_json && typeof task.result_json === 'object' ? task.result_json : {};
-  const prompt = String(payload.prompt || '').trim();
-  const promptKey = String(payload.prompt_key || task.task_type || '').trim();
-
-  // Composer: run the same hub turn brain with worker LLM as completeChat (retries preserved).
-  if (promptKey === BOUNTY_COMPOSER_PROMPT_KEY || task.task_type === BOUNTY_COMPOSER_PROMPT_KEY) {
-    return buildComposerTurnViaHubService(payload);
-  }
-
-  // RAG Knowledge Base Verification
-  if (promptKey === RAG_IDLE_PROMPT_KEY || task.task_type === RAG_IDLE_PROMPT_KEY || payload.rag_idle_task) {
-    const chunkTitle = String(payload.chunk?.title || 'Knowledge Chunk');
-    const chunkText = String(payload.chunk?.text || '');
-    const instructions = String(payload.instructions || 'Analyze the chunk and extract structured assessment.');
-    const schemaObj = payload.expected_schema || {};
-    const schemaStr = JSON.stringify(schemaObj);
-
-    const ragPrompt = [
-      'You are the Quavence Knowledge Base RAG Verification AI Worker.',
-      'Analyze the given knowledge base chunk according to instructions and return ONLY a valid JSON object matching the requested schema. Do not include markdown fences, comments, or extra text.',
-      '',
-      `KNOWLEDGE BASE CHUNK [${chunkTitle}]:`,
-      chunkText,
-      '',
-      'INSTRUCTIONS:',
-      instructions,
-      '',
-      'EXPECTED JSON SCHEMA:',
-      schemaStr,
-      '',
-      'Return JSON matching schema:'
-    ].join('\n');
-
-    const modelText = await callLlm(ragPrompt);
-    let parsed = parseJsonCandidate(modelText, {});
-    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-      parsed = {};
-    }
-    return normalizeResultForSubmit(RAG_IDLE_PROMPT_KEY, {
-      subtype: payload.subtype,
-      ...parsed,
-    });
-  }
-
-  // AI Glyph & NFT Art Generation
-  if (promptKey === GLYPH_GEN_PROMPT_KEY || task.task_type === GLYPH_GEN_PROMPT_KEY || payload.ai_glyph_task) {
-    const theme = String(payload.theme || 'Cybernetic Genesis Core');
-    const rarity = String(payload.rarity || 'Rare');
-    const edition = Number(payload.edition || 1000);
-    const seed = Number(payload.seed || 420911);
-    const creativePrompt = String(payload.creative_prompt || '').trim();
-    const instructions = String(payload.instructions || 'Generate a valid On-Chain vector SVG generative art glyph.');
-    const paletteStr = payload.palette ? (typeof payload.palette === 'object' ? JSON.stringify(payload.palette) : String(payload.palette)) : '';
-    const schemaStr = JSON.stringify(payload.expected_schema || {});
-
-    const glyphPrompt = [
-      'You are the Quavence Generative Art & On-Chain AI Glyph Worker.',
-      'Generate an intricate, authentic On-Chain SVG art glyph matching the requested creative directives and schema.',
-      'Output ONLY a valid JSON object matching the requested schema. No markdown fences, no explanatory text.',
-      '',
-      `THEME: "${theme}"`,
-      `RARITY: ${rarity}`,
-      `EDITION: #${edition}`,
-      `SEED: ${seed}`,
-      creativePrompt ? `CREATIVE DIRECTIVE: ${creativePrompt}` : '',
-      paletteStr ? `PALETTE: ${paletteStr}` : '',
-      '',
-      'INSTRUCTIONS:',
-      instructions,
-      '',
-      'EXPECTED JSON SCHEMA:',
-      schemaStr,
-      '',
-      'Return JSON matching schema:'
-    ].filter(Boolean).join('\n');
-
-    let modelText = '';
-    try {
-      modelText = await callLlm(glyphPrompt);
-    } catch (e) {
-      warn(`[Glyph Worker] LLM call error: ${e.message}, generating deterministic fallback glyph`);
-    }
-
-    let parsed = parseJsonCandidate(modelText, {});
-    let svg = typeof parsed?.svg_content === 'string' ? parsed.svg_content.trim() : '';
-
-    // If model didn't output valid SVG envelope, generate high-fidelity procedural SVG
-    if (!svg.startsWith('<svg') || !svg.endsWith('</svg>') || !/xmlns=['"]http:\/\/www\.w3\.org\/2000\/svg['"]/.test(svg)) {
-      const hue1 = (seed * 137) % 360;
-      const hue2 = (hue1 + 60) % 360;
-      const r1 = 80 + (seed % 60);
-      const r2 = 140 + (seed % 40);
-      const strokeW = 2 + (seed % 4);
-
-      svg = [
-        '<svg viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg">',
-        '  <defs>',
-        '    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">',
-        '      <stop offset="0%" stop-color="#07090E"/>',
-        '      <stop offset="100%" stop-color="#121824"/>',
-        '    </linearGradient>',
-        '    <linearGradient id="glyphGrad" x1="0%" y1="0%" x2="100%" y2="100%">',
-        `      <stop offset="0%" stop-color="hsl(${hue1}, 100%, 65%)"/>`,
-        `      <stop offset="100%" stop-color="hsl(${hue2}, 100%, 55%)"/>`,
-        '    </linearGradient>',
-        '    <filter id="glow" x="-20%" y="-20%" width="140%" height="140%">',
-        '      <feGaussianBlur stdDeviation="8" result="blur"/>',
-        '      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>',
-        '    </filter>',
-        '  </defs>',
-        '  <rect width="512" height="512" rx="32" fill="url(#bg)"/>',
-        `  <circle cx="256" cy="256" r="${r2}" fill="none" stroke="url(#glyphGrad)" stroke-width="${strokeW}" stroke-dasharray="12,8" opacity="0.4"/>`,
-        `  <polygon points="256,${256 - r1} ${256 + r1},256 256,${256 + r1} ${256 - r1},256" fill="none" stroke="url(#glyphGrad)" stroke-width="${strokeW + 1}" filter="url(#glow)"/>`,
-        `  <circle cx="256" cy="256" r="${Math.floor(r1 * 0.5)}" fill="none" stroke="url(#glyphGrad)" stroke-width="2"/>`,
-        `  <circle cx="256" cy="256" r="10" fill="hsl(${hue1}, 100%, 75%)" filter="url(#glow)"/>`,
-        `  <text x="256" y="470" text-anchor="middle" fill="#64748B" font-family="sans-serif" font-size="12" letter-spacing="4">QUAVENCE GENESIS #${edition}</text>`,
-        '</svg>'
-      ].join('\n');
-    }
-
-    const glyphHash = crypto.createHash('sha256').update(svg).digest('hex');
-    const title = parsed?.glyph_title || `Quavence Genesis ${theme.split(' ')[0]} #${edition}`;
-
-    return {
-      task_type: GLYPH_GEN_PROMPT_KEY,
-      glyph_title: title,
-      theme,
-      rarity,
-      edition,
-      seed,
-      svg_content: svg,
-      glyph_hash: glyphHash,
-      artist_notes: parsed?.artist_notes || `Procedurally attested on-chain glyph with seed ${seed}`,
-      completed_at: new Date().toISOString(),
-    };
-  }
-
-  if (!prompt) {
-    return {
-      worker_notice: 'No prompt payload found in task.result_json',
-      task_type: task.task_type,
-      completed_at: new Date().toISOString()
-    };
-  }
-
-  const modelText = await callLlm(prompt);
-  let parsed = parseJsonCandidate(modelText, {});
-
-  if (!isValidParsedForPromptKey(promptKey, parsed)) {
-    if (promptKey === RISK_PROMPT_KEY) {
-      warn('risk task got non-structured model output, running repair pass');
-      parsed = await recoverRiskParsed(prompt, modelText);
-    } else {
-      throw new Error(`Model returned invalid structured output for ${promptKey}`);
-    }
-  }
-
-  if (promptKey === SUMMARY_PROMPT_KEY) {
-    const fallbackSummary = String(modelText || '').trim().slice(0, 4000);
-    return {
-      summary: String(parsed.summary || fallbackSummary).trim(),
-      positive_factors: normalizeStringArray(parsed.positive_factors),
-      recommendations: normalizeStringArray(parsed.recommendations)
-    };
-  }
-
-  if (promptKey === RISK_PROMPT_KEY) {
-    const riskLevelRaw = String(parsed.risk_level || 'medium').toLowerCase();
-    const confidenceRaw = String(parsed.confidence || 'medium').toLowerCase();
-    const riskLevel = ['low', 'medium', 'high'].includes(riskLevelRaw) ? riskLevelRaw : 'medium';
-    const confidence = ['low', 'medium', 'high'].includes(confidenceRaw) ? confidenceRaw : 'medium';
-
-    return {
-      risk_level: riskLevel,
-      confidence,
-      risk_flags: normalizeRiskFlags(parsed.risk_flags),
-      questions_to_author: normalizeStringArray(parsed.questions_to_author),
-      evidence_gaps: normalizeStringArray(parsed.evidence_gaps)
-    };
-  }
-
-  if (promptKey === HISTORICAL_PROMPT_KEY) {
-    return {
-      similar_proposals: normalizeHistoricalSimilarProposals(parsed.similar_proposals)
-    };
-  }
-
-  if (promptKey === BOUNTY_SCREEN_PROMPT_KEY) {
-    const recommendationRaw = String(parsed.recommendation || 'needs_review').trim().toLowerCase();
-    const recommendation = ['needs_review', 'likely_complete', 'insufficient_proof'].includes(recommendationRaw)
-      ? recommendationRaw
-      : 'needs_review';
-    const confidenceNum = Number(parsed.confidence);
-    const confidence = Number.isFinite(confidenceNum)
-      ? Math.max(0, Math.min(1, confidenceNum))
-      : 0.5;
-    return {
-      pass: Boolean(parsed.pass),
-      flags: normalizeStringArrayForSubmit(parsed.flags, 12, 64),
-      confidence,
-      summary: String(parsed.summary || '').trim().slice(0, 4000),
-      missing: normalizeStringArrayForSubmit(parsed.missing, 12, 280),
-      suggested_questions: normalizeStringArrayForSubmit(parsed.suggested_questions, 12, 280),
-      recommendation,
-    };
-  }
-
-  if (promptKey === BOUNTY_CONSULTANT_PROMPT_KEY) {
-    return normalizeConsultantTurnForSubmit(parsed);
-  }
-
-  if (promptKey === BOUNTY_COMPOSER_PROMPT_KEY) {
-    return normalizeComposerTurnForSubmit(parsed);
-  }
-
-  throw new Error(`unsupported_task_type:${promptKey || task.task_type || 'unknown'}`);
-}
-
 async function heartbeat() {
-  const payload = {};
+  const payload = {
+    device_id: WORKER_DEVICE_ID,
+    hardware_fingerprint: WORKER_HARDWARE_FINGERPRINT,
+  };
   if (WORKER_QVNC_ADDRESS) payload.qvnc_address = WORKER_QVNC_ADDRESS;
   if (WORKER_KEYPAIR?.publicKeyHex) payload.worker_pubkey = WORKER_KEYPAIR.publicKeyHex;
   if (WORKER_COUNTRY_CODE) payload.country_code = WORKER_COUNTRY_CODE;
@@ -1489,6 +849,11 @@ async function heartbeat() {
   if (WORKER_REGION_NAME) payload.region_name = WORKER_REGION_NAME;
   if (WORKER_COUNTRY_CODE || WORKER_COUNTRY_NAME || WORKER_REGION_NAME) {
     payload.geo_source = 'self_reported';
+  }
+  payload.compute_ready = !runtimePolicyBlocked && Boolean(runtimeAttestation);
+  if (!payload.compute_ready) {
+    payload.reason = runtimePolicyBlockReason || (runtimeAttestation ? 'Runtime policy blocked' : 'LM Studio or Ollama offline / models not loaded');
+    payload.runtime = runtimeAttestation || null;
   }
   const res = await apiCall('POST', '/api/ai/nodes/heartbeat', payload);
   if (!res.ok) {
@@ -1511,17 +876,26 @@ function markHubRuntimeAttestationRejected(policyVersion = '') {
 
 async function refreshRuntimePolicyState() {
   const previousPolicy = runtimePolicy;
-  runtimePolicy = await fetchHubRuntimePolicy(apiCall);
+  const previousAttestation = runtimeAttestation;
+  const fetchedPolicy = await fetchHubRuntimePolicy(apiCall);
   runtimePolicyFetchedAt = Date.now();
 
-  if (!runtimePolicy) {
+  if (!fetchedPolicy) {
     if (previousPolicy?.enabled && previousPolicy.mode !== 'off') {
+      runtimePolicy = previousPolicy;
+      if (previousAttestation && !hubRuntimeAttestationRejected) {
+        runtimeAttestation = previousAttestation;
+        runtimePolicyBlocked = false;
+        runtimePolicyBlockReason = '';
+        warn('Transient network glitch fetching Hub runtime policy; using cached policy and attestation');
+        return true;
+      }
       runtimePolicyBlocked = true;
       runtimePolicyBlockReason = 'Runtime blocked: could not fetch Hub runtime policy';
-      runtimeAttestation = null;
       warn(runtimePolicyBlockReason);
       return false;
     }
+    runtimePolicy = null;
     runtimePolicyBlocked = false;
     runtimePolicyBlockReason = hubRuntimeAttestationRejected
       ? 'Runtime blocked: hub rejected runtime attestation'
@@ -1529,6 +903,8 @@ async function refreshRuntimePolicyState() {
     runtimeAttestation = null;
     return !runtimePolicyBlocked;
   }
+
+  runtimePolicy = fetchedPolicy;
 
   if (!runtimePolicy.enabled || runtimePolicy.mode === 'off') {
     hubRuntimeAttestationRejected = false;
@@ -1560,8 +936,6 @@ async function refreshRuntimePolicyState() {
     const versionChanged = policyVersion
       && hubRuntimeAttestationRejectedVersion
       && policyVersion !== hubRuntimeAttestationRejectedVersion;
-    // Retry when local runtime still looks healthy — hub policy may have softened,
-    // or attestation improved (detected ids). Avoid permanent lock until policy bump.
     const canRetryClaim = !verification.blocked && Boolean(verification.attestation);
     if ((versionChanged || canRetryClaim) && !verification.blocked) {
       hubRuntimeAttestationRejected = false;
@@ -1610,6 +984,8 @@ async function claimTask() {
 
   const res = await apiCall('POST', '/api/ai/nodes/tasks/claim', {
     runtime_attestation: runtimeAttestation,
+    device_id: WORKER_DEVICE_ID,
+    hardware_fingerprint: WORKER_HARDWARE_FINGERPRINT,
   });
 
   if (res.status === 503) {
@@ -1642,7 +1018,6 @@ async function claimTask() {
         : '';
       if (hasRuntimeAttestation()) {
         markHubRuntimeAttestationRejected(runtimeAttestation?.runtime_policy_version);
-        // Short backoff so refreshRuntimePolicyState can retry after hub/policy softens.
         claimBackoffUntil = Date.now() + Math.max(POLL_INTERVAL_MS * 5, 30000);
       } else {
         runtimePolicyBlocked = true;
@@ -1671,13 +1046,8 @@ function formatTaskCompletedLogLine(taskId, completionPayload) {
   const reward = completionPayload?.reward;
   const asset = String(reward?.asset || 'QVNC').trim() || 'QVNC';
   const rewardAmount = reward?.amount != null ? String(reward.amount) : '?';
-  const usdRaw = reward?.meta?.usd_amount;
-  const usd = Number(usdRaw);
-  if (Number.isFinite(usd) && usd > 0) {
-    return `task completed: ${taskId} (~$${usd.toFixed(4)} USD → ${rewardAmount} ${asset})`;
-  }
   if (reward?.amount != null && String(reward.amount).trim() !== '') {
-    return `task completed: ${taskId} (${reward.amount} ${asset})`;
+    return `task completed: ${taskId} (${rewardAmount} ${asset})`;
   }
   return `task completed: ${taskId}`;
 }
@@ -1687,13 +1057,33 @@ async function completeTask(taskId, taskType, claimNonce, resultJson) {
     throw new Error('Missing claim nonce for secure submit');
   }
 
-  const normalizedResult = normalizeResultForSubmit(taskType, resultJson);
   const submitIdempotencyKey = makeIdempotencyKey();
   const submitTimestamp = Math.floor(Date.now() / 1000);
-  const submitSignature = buildSubmitSignature(NODE_TOKEN, taskId, claimNonce, submitTimestamp, normalizedResult);
+  const submitSignature = buildSubmitSignature(NODE_TOKEN, taskId, claimNonce, submitTimestamp, resultJson);
+
+  if (!hasRuntimeAttestation() && runtimePolicy) {
+    try {
+      const verification = await verifyLocalRuntimeAgainstPolicy({
+        policy: runtimePolicy,
+        llmProvider: LLM_PROVIDER,
+        baseUrl: normalizeOpenAICompatBaseUrl(OPENAI_COMPAT_BASE_URL),
+        apiKey: OPENAI_COMPAT_API_KEY,
+      });
+      if (!verification.blocked && (verification.attestation || buildRuntimeAttestation(runtimePolicy))) {
+        runtimeAttestation = verification.attestation || buildRuntimeAttestation(runtimePolicy);
+      }
+    } catch (err) {
+      warn(`Recovery verification failed before submit: ${err?.message || err}`);
+    }
+  }
+
+  if (runtimePolicyEnforced() && !hasRuntimeAttestation()) {
+    warn(`Aborting task completion submit for ${taskId}: runtime attestation is missing, avoiding policy mismatch penalty`);
+    throw new Error('runtime_attestation_missing_on_complete');
+  }
 
   const res = await apiCall('POST', `/api/ai/nodes/tasks/${encodeURIComponent(taskId)}/complete`, {
-    result_json: normalizedResult,
+    result_json: resultJson,
     claim_nonce: claimNonce,
     submit_timestamp: submitTimestamp,
     submit_idempotency_key: submitIdempotencyKey,
@@ -1800,31 +1190,27 @@ async function processTask(task) {
   const taskId = task?.id;
   if (!taskId) return;
 
-  log(`task claimed: ${taskId} (${task.task_type})`);
-
-  const taskType = String(task?.task_type || '').trim().toUpperCase();
-  if (!WORKER_EXECUTABLE_TASK_TYPES.has(taskType)) {
-    const message = `unsupported_task_type:${taskType || 'unknown'}`;
-    await failTask(taskId, message);
-    warn(`task failed: ${taskId} -> ${message}`);
-    return;
-  }
+  const controlSuffix = task.is_control_task ? ' [control]' : '';
+  log(`task claimed: ${taskId} (${task.task_type || 'generic'})${controlSuffix}`);
 
   let lastError = null;
 
   for (let attempt = 1; attempt <= TASK_EXECUTION_MAX_RETRIES; attempt += 1) {
     try {
       if (runtimePolicy?.enabled && runtimePolicy.mode !== 'off') {
-        const runtimeOk = await refreshRuntimePolicyState();
-        if (!runtimeOk || runtimePolicyBlocked) {
-          const message = runtimePolicyBlockReason || 'runtime policy mismatch';
-          warn(`task failed: ${taskId} -> ${message}`);
-          await failTask(taskId, message);
-          return;
+        const policyStale = !runtimePolicyFetchedAt || (Date.now() - runtimePolicyFetchedAt >= RUNTIME_POLICY_REFRESH_MS);
+        if (policyStale || !hasRuntimeAttestation()) {
+          const runtimeOk = await refreshRuntimePolicyState();
+          if (!runtimeOk || runtimePolicyBlocked) {
+            const message = runtimePolicyBlockReason || 'runtime policy mismatch';
+            warn(`task failed: ${taskId} -> ${message}`);
+            await failTask(taskId, message);
+            return;
+          }
         }
       }
 
-      const resultJson = await buildTaskResult(task);
+      const resultJson = await executeTask(task);
       const claimNonce = String(task?.claim_nonce || '').trim();
       const completion = await completeTask(taskId, String(task?.task_type || ''), claimNonce, resultJson);
       if (completion?.leaseExpired) {
@@ -1955,7 +1341,7 @@ async function start() {
 
   log('starting worker agent');
   log(`Device registered: ${shortDeviceId(WORKER_DEVICE_ID)}`);
-  log(`executable_task_types=${[...WORKER_EXECUTABLE_TASK_TYPES].join(',')}`);
+  log('runner_mode=generic_dumb_runner');
   if (LLM_PROVIDER === 'openai_compat') {
     log(
       `api=${API_BASE_URL}, provider=openai_compat, base=${normalizeOpenAICompatBaseUrl(OPENAI_COMPAT_BASE_URL)}, model=${OPENAI_COMPAT_MODEL}`
@@ -1972,8 +1358,6 @@ async function start() {
     warn(`runtime policy check failed: ${error.message}`);
   }
 
-  // Do not fail hard on startup when backend is temporarily unavailable.
-  // Worker should self-recover once API becomes reachable again.
   try {
     await heartbeat();
   } catch (error) {
@@ -2018,4 +1402,3 @@ start().catch((error) => {
   }
   process.exit(1);
 });
-

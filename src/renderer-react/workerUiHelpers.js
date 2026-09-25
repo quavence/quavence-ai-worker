@@ -13,7 +13,8 @@ export function formatProviderLabel(provider) {
 }
 
 /** TASK_BOUNTY_COMPOSER_TURN → Task Composer Turn */
-export function formatTaskTypeLabel(raw) {
+export function formatTaskTypeLabel(raw, isControl = false) {
+  if (isControl) return 'PoUS Attestation';
   const text = String(raw || '').trim();
   if (!text) return 'Task';
   if (/^TASK_BOUNTY_COMPOSER/i.test(text)) return 'Task Composer Turn';
@@ -39,8 +40,15 @@ export function formatUsdRewardValue(value) {
 
 export function formatQvncSettlementAmount(value) {
   const n = Number(String(value ?? '').trim());
-  if (!Number.isFinite(n) || n <= 0) return '0';
-  return n.toFixed(8);
+  if (!Number.isFinite(n) || n <= 0) return '0.0000';
+  const str = n.toFixed(8);
+  const [intPart, decPart] = str.split('.');
+  if (!decPart) return `${intPart}.0000`;
+  const trimmedDec = decPart.replace(/0+$/, '');
+  if (trimmedDec.length < 4) {
+    return `${intPart}.${decPart.slice(0, 4)}`;
+  }
+  return `${intPart}.${trimmedDec}`;
 }
 
 export function normalizeRewardAssetLabel(value, fallback = 'QVNC') {
@@ -982,7 +990,17 @@ export function parseProgressEvent(line) {
     if (rewardMatch) {
       return {
         ts,
-        label: `Task completed · + $${rewardMatch[1]} / ≈ ${rewardMatch[2]} ${rewardMatch[3]}`,
+        label: `Task completed · + ${rewardMatch[2]} ${rewardMatch[3]}`,
+        tone: 'good',
+        kind: 'task_completed',
+        taskId: completed[1],
+      };
+    }
+    const simpleReward = suffix.match(/\(?\+?\s*([0-9.]+)\s*(\w+)\)?/i);
+    if (simpleReward) {
+      return {
+        ts,
+        label: `Task completed · + ${simpleReward[1]} ${simpleReward[2]}`,
         tone: 'good',
         kind: 'task_completed',
         taskId: completed[1],

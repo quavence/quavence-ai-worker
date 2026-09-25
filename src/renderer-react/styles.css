@@ -1523,6 +1523,24 @@ body {
   line-height: 1;
 }
 
+.dashboard .contribution-hero-unit {
+  font-size: 0.52em;
+  font-weight: 600;
+  margin-left: 8px;
+  color: var(--accent);
+  opacity: 0.85;
+  letter-spacing: 0.02em;
+  vertical-align: baseline;
+}
+
+.dashboard .contribution-stat-unit {
+  font-size: 0.68em;
+  font-weight: 600;
+  margin-left: 5px;
+  color: var(--text-muted);
+  vertical-align: baseline;
+}
+
 .dashboard .contribution-hero-label {
   display: flex;
   flex-direction: column;

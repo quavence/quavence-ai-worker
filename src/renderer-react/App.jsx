@@ -1185,6 +1185,9 @@ export default function App() {
     const done = new Set();
     for (let i = logs.length - 1; i >= 0; i -= 1) {
       const line = String(logs[i] || '');
+      if (/waiting for tasks|worker started|starting worker/i.test(line)) {
+        return null;
+      }
       const completed = line.match(/task completed:\s*([a-f0-9-]+)/i);
       if (completed) {
         done.add(completed[1]);
@@ -1198,7 +1201,8 @@ export default function App() {
       const claimed = line.match(/task claimed:\s*([a-f0-9-]+)\s*\(([^)]+)\)/i);
       if (claimed) {
         if (!done.has(claimed[1])) {
-          return { id: claimed[1], type: claimed[2] };
+          const isControl = /\[control\]/i.test(line);
+          return { id: claimed[1], type: claimed[2], isControl };
         }
         // Worker only runs one task at a time sequentially.
         // If the latest claimed task has already completed or failed,
@@ -1346,8 +1350,9 @@ export default function App() {
   );
   const pousBoostPercent = useMemo(() => {
     if (!status?.running) return 0;
-    if (todayTasks >= 10) return 50;
-    if (todayTasks >= 5) return 35;
+    if (todayTasks >= 51) return 50;
+    if (todayTasks >= 21) return 40;
+    if (todayTasks >= 6) return 30;
     if (todayTasks >= 1) return 20;
     return 0;
   }, [status?.running, todayTasks]);
@@ -1355,9 +1360,11 @@ export default function App() {
   const accruedTotal = workerOverview?.rewards?.accrued_amount ?? 0;
   const heldTotal = workerOverview?.rewards?.accrued_held_amount ?? 0;
   const rejectedTotal = workerOverview?.rewards?.accrued_rejected_amount ?? 0;
-  const showAccruedBreakdown = Number(heldTotal) > 0 || Number(rejectedTotal) > 0;
   const paidTotal = workerOverview?.rewards?.paid_amount ?? 0;
   const pendingPayouts = workerOverview?.payouts?.pending ?? 0;
+  const pendingBatch = workerOverview?.payouts?.latest_batch || null;
+  const pendingBatchAmount = Number(workerOverview?.payouts?.pending_amount || workerOverview?.rewards?.queued_amount || 0);
+  const showAccruedBreakdown = Number(heldTotal) > 0 || Number(rejectedTotal) > 0 || pendingBatchAmount > 0;
   const detectedModels = runtimeCheck?.detectedModels?.length
     ? runtimeCheck.detectedModels
     : endpointRawModels;
@@ -2165,11 +2172,13 @@ export default function App() {
                       className={`dash-hero-title${currentTask ? ' is-task' : ''}`}
                       title={currentTask ? currentTask.type : undefined}
                     >
-                      {currentTask ? formatTaskTypeLabel(currentTask.type) : uiState.title}
+                      {currentTask ? formatTaskTypeLabel(currentTask.type, currentTask.isControl) : uiState.title}
                     </h2>
                     {currentTask ? (
                       <p className="dash-hero-lede">
-                        Keep {providerLabel} running until this finishes.
+                        {currentTask.isControl
+                          ? 'GPU attestation for 1.5× staking boost'
+                          : `Keep ${providerLabel} running until this finishes.`}
                       </p>
                     ) : (() => {
                       const heroTitle = uiState.title;
@@ -2217,7 +2226,7 @@ export default function App() {
                         title={
                           pousBoostPercent > 0
                             ? `PoUS Staking Boost active (+${pousBoostPercent}% bnWeight for ${todayTasks} tasks today)`
-                            : 'PoUS Staking Boost: Complete at least 1 verified compute task to activate +20% boost (+35% for 5+, +50% for 10+)'
+                            : 'PoUS Staking Boost: Complete at least 1 verified compute task to activate +20% boost (+30% for 6+, +40% for 21+, +50% for 51+)'
                         }
                         style={
                           pousBoostPercent > 0
@@ -2272,13 +2281,11 @@ export default function App() {
                       </div>
                       <div className="contribution-hero">
                         <div className="contribution-hero-value">
-                          {formatUsdRewardValue(workerOverview?.rewards?.accrued_amount_usd)}
+                          {formatQvncSettlementAmount(accruedTotal)}
+                          <span className="contribution-hero-unit">{rewardAsset}</span>
                         </div>
                         <div className="contribution-hero-label">
                           Payout-eligible
-                          <span className="contribution-hero-sub">
-                            ≈ {formatQvncSettlementAmount(accruedTotal)} {rewardAsset}
-                          </span>
                         </div>
                       </div>
                       <div className="contribution-grid">
@@ -2291,7 +2298,10 @@ export default function App() {
                           <div className="contribution-stat-label">Today</div>
                         </div>
                         <div>
-                          <div className="contribution-stat-value">{formatUsdRewardValue(workerOverview?.rewards?.paid_amount_usd)}</div>
+                          <div className="contribution-stat-value">
+                            {formatQvncSettlementAmount(paidTotal)}
+                            <span className="contribution-stat-unit">{rewardAsset}</span>
+                          </div>
                           <div className="contribution-stat-label">Lifetime paid</div>
                         </div>
                         <div>
@@ -2301,12 +2311,23 @@ export default function App() {
                       </div>
                       {showAccruedBreakdown ? (
                         <dl className="rail-kv earnings-kv contribution-breakdown">
+                          {pendingBatchAmount > 0 ? (
+                            <div>
+                              <dt title={pendingBatch?.batch_id ? `Batch #${pendingBatch.batch_id_short || pendingBatch.batch_id} (${pendingBatch.status})` : 'In pending payout batch'}>
+                                In batch {pendingBatch?.tasks_count ? `(${pendingBatch.tasks_count} tasks)` : ''}
+                              </dt>
+                              <dd className="earnings-dual" style={{ color: 'var(--brand-teal, #2dd4bf)' }}>
+                                <span style={{ fontWeight: 600 }}>
+                                  {formatQvncSettlementAmount(pendingBatchAmount)} {rewardAsset}
+                                </span>
+                              </dd>
+                            </div>
+                          ) : null}
                           {Number(heldTotal) > 0 ? (
                             <div>
                               <dt>Held (review)</dt>
                               <dd className="earnings-dual earnings-muted">
-                                <span>{formatUsdRewardValue(workerOverview?.rewards?.accrued_held_amount_usd)}</span>
-                                <span className="earnings-settlement">≈ {formatQvncSettlementAmount(heldTotal)} {rewardAsset}</span>
+                                <span>{formatQvncSettlementAmount(heldTotal)} {rewardAsset}</span>
                               </dd>
                             </div>
                           ) : null}
@@ -2314,8 +2335,7 @@ export default function App() {
                             <div>
                               <dt>Not payable</dt>
                               <dd className="earnings-dual earnings-muted">
-                                <span>{formatUsdRewardValue(workerOverview?.rewards?.accrued_rejected_amount_usd)}</span>
-                                <span className="earnings-settlement">≈ {formatQvncSettlementAmount(rejectedTotal)} {rewardAsset}</span>
+                                <span>{formatQvncSettlementAmount(rejectedTotal)} {rewardAsset}</span>
                               </dd>
                             </div>
                           ) : null}

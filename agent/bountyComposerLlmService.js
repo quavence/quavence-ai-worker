@@ -6,6 +6,8 @@
  * and must not require hub LLM deps (packaged agent has this file only).
  */
 
+import { getDomainProfileBlock, buildDomainChipsForGaps } from './bountyDomainProfiles.js';
+
 const WORKER_INJECTED_LLM_CONFIG = {
   temperature: 0.2,
   maxTokens: 2048,
@@ -157,6 +159,13 @@ export function buildComposerLlmSystemPrompt(input = null) {
     ].join('\n');
   }
 
+  const domainId =
+    input?.hints?.classifiedDomainId ||
+    input?.hints?.taxonomy?.domainId ||
+    input?.sectionDraft?.classification?.domainId ||
+    input?.draftPatch?.classification?.domainId;
+  const domainProfileBlock = getDomainProfileBlock(domainId);
+
   return [
     'WHO YOU ARE:',
     'You are the Quavence Bounty Consultant in Task Composer.',
@@ -173,11 +182,17 @@ export function buildComposerLlmSystemPrompt(input = null) {
     '   - guidance: operator still collecting a brief. Chips + asks only. No draft section fills, no taxonomy, no fake ready. Return 2–4 followUpChips (direction or fact asks) or an honest ask in assistantMessage.',
     '   - draft: facts describe hireable work. Extract into sections with sourceFactIds. Always include draftPatch.title when task is filled — a distinct short publishable title grounded in facts. Never return an empty draftPatch when user facts are substantial.',
     '7b) DRAFT COMPLETENESS & SCOPE PRESERVATION (draft mode only): Extract concrete work products into deliverables[] with sourceFactIds without destructive summarization. When the owner brief enumerates specific categories, named items, endpoints, modules, or screens, each distinct group/category MUST be emitted as its own separate object entry in deliverables[] containing its item names and counts (e.g. `BASE (6 icons): First Step, First Submission, Active Participant, Task Enthusiast, First Approval, Consistent Quality`), rather than collapsing all groups into a single comma-separated sentence. Every named deliverable artifact from the facts must be preserved in the draft. If acceptance/proof are stated in facts (experience, links, screenshots, criteria), extract those lines. If absent, leave arrays empty and gaps[] — do NOT invent into draftPatch.',
-    '7c) GAP PROPOSALS (draft mode): if acceptance/proof (or other reviewability gaps) remain open, return 1-3 followUpChips that HELP CLOSE HOLES for a reviewable bounty. Proposals MAY include reasonable completeness the operator did not state (format, size like 512×512, zip delivery, screenshots, style match) — that is the consultant job. REQUIRED per chip: label (owner language, short choice) + value (English draft line) + section. Section targeting: format/size/channel/package → deliverables; tone/style/quality bar → acceptance; submission evidence (screenshots of apply, links proving delivery) → proof. Examples: label "Размер 512", value "All icons delivered as PNG 512x512", section "deliverables"; label "Тон", value "Professional tone, no fluff", section "acceptance"; label "Скриншот", value "Attach screenshots of the published post", section "proof". NEVER What/How/Do you / "?". NEVER put those proposals into draftPatch until Confirm — chips are the proposal path. Do NOT offer contradictory options in the same turn (e.g. both "no transparency" and "transparent background") — pick one coherent set, or offer mutually exclusive alternatives as clearly competing choices without stacking opposites into one Confirm batch.',
+    '7c) GAP PROPOSALS (draft mode): if acceptance/proof (or other reviewability gaps) remain open, return 1-3 followUpChips that HELP CLOSE HOLES for a reviewable bounty. REQUIRED per chip: section ("deliverables" | "acceptance" | "proof"), label (short 2-4 word choice title in owner language), value (one concrete English draft line grounded in the detected domain). DOMAIN RULE: see DOMAIN PROFILE below — proposals MUST strictly match the domain vocabulary. NEVER ask questions ("What/How/Do you/?"). NEVER use examples outside the detected domain profile (no social media posts for design/code tasks, etc.). NEVER put those proposals into draftPatch until Confirm — chips are the proposal path. Do NOT offer contradictory options in the same turn.',
     '8) CHIPS: concrete Confirm-able choices only — never open questions / Add-prompts / interrogatives. Chip labels = owner language; chip values = English draft lines (including completeness proposals). In guidance, direction labels only (no invent values into draft). Never ship generic placeholder values.',
     '9) CHAT: short dialogue, never retell the owner brief. Say what was filled vs still empty on the left only when draft mode actually filled something; never promise chips or draft fills that are absent. Never write English stubs like "What about", "Can we clarify", or "Draft updated. Check the sections".',
-    '9b) CHIP CONTINUATION: when hints.chipAnswer is true, the operator just Confirmed proposal chips into the draft (see sectionDraft statuses). Acknowledge briefly. If openGaps remain, return new concrete followUpChips. If only Lock remains (sections suggested but filled), tell the operator to Lock proposals on the left — do not mention Apply yet. If everything required is already confirmed (Ready), say Apply only — do not ask to Lock. Never say both Lock and Apply in one message. Keep assistantMessage in the owner language.',
+    '9b) CHIP CONTINUATION: when hints.chipAnswer is true, the operator just Confirmed proposal chips into the draft (see sectionDraft statuses). Acknowledge briefs. If openGaps remain, return new concrete followUpChips. If only Lock remains (sections suggested but filled), tell the operator to Lock proposals on the left — do not mention Apply yet. If everything required is already confirmed (Ready), say Apply only — do not ask to Lock. Never say both Lock and Apply in one message. Keep assistantMessage in the owner language.',
     '10) JSON only. Never echo context keys.',
+    '',
+    domainProfileBlock || [
+      'DOMAIN RULE:',
+      'Proposal chips MUST strictly align with the domain you detect in classification.domainId (e.g. design → graphic specs/source files; development → code/tests/CI; crypto_web3 → contract verification/testnet; smm_marketing → post copy/live URLs).',
+      'NEVER suggest options from other domains (no social media screenshots for design/code tasks, etc.).',
+    ].join('\n'),
     '',
     'OUTPUT SHAPE:',
     '{"mode":"guidance|draft","assistantMessage":"string","draftPatch":{"title":{"text":"string","sourceFactIds":["f_user_1"]},"task":{"text":"string","sourceFactIds":["f_user_1"]},"deliverables":[],"acceptance":[],"proof":[],"outOfScope":null,"gaps":[{"section":"acceptance","reason":"string"}],"classification":{"domainId":"string","subcategoryId":null,"typeId":"string","difficultyId":"medium","tagIds":[],"platformIds":[],"confidence":0.0}},"followUpChips":[{"label":"string","value":"string","section":"deliverables"}]}',
@@ -242,81 +257,11 @@ export function collectNonEnglishDraftDrops(draftPatch) {
   return dropped;
 }
 
-export function shouldRetryEnglishDraft(output) {
-  if (!output || output.mode !== 'draft') return false;
-  const drops = Array.isArray(output.debug?.nonEnglishDraftDrops)
-    ? output.debug.nonEnglishDraftDrops
-    : [];
-  if (!drops.length) return false;
-  const patch = output.draftPatch && typeof output.draftPatch === 'object' ? output.draftPatch : {};
-  const taskDropped = drops.some((drop) => drop?.section === 'task');
-  if (taskDropped && !patch.task) return true;
-  // Chip values were Cyrillic-only and contour stripped them while gaps remain.
-  const chips = Array.isArray(output.followUpChips) ? output.followUpChips : [];
-  const chipValuesDropped = Boolean(output.debug?.nonEnglishChipValuesDropped);
-  if (chipValuesDropped && chips.length === 0) return true;
-  return false;
-}
-
-function buildEnglishDraftRetryCorrection(drops) {
-  const list = Array.isArray(drops) ? drops : [];
-  const samples = list
-    .slice(0, 4)
-    .map((drop) => `- ${drop.section}: ${drop.text}`)
-    .join('\n');
-  return [
-    'CORRECTION: previous JSON put non-English (Cyrillic) text into draftPatch and/or chip values.',
-    'Left draft lines + chip values MUST be English ONLY. Translate the same facts — do not invent new obligations.',
-    'Product language may remain Russian inside an English sentence (e.g. "Write a short Telegram guide in Russian…").',
-    'Chip labels may stay in owner language; chip values must be English draft lines.',
-    samples ? `Dropped samples:\n${samples}` : '',
-    'Keep mode "draft". Return ONLY the corrected JSON object.',
-  ]
-    .filter(Boolean)
-    .join('\n');
-}
-
 export function buildEnglishDraftRejectAck(ownerText) {
   if (ownerUsesCyrillic(ownerText)) {
     return 'Task не принял: в draft нужен English (перевод брифа). Переформулируй или отправь ещё раз.';
   }
   return 'Task was not accepted: draft lines must be English. Rephrase or send again.';
-}
-
-/** Prefer retry English task/lines/chips when primary lost them to the language gate. */
-export function mergeEnglishRetryTurn(primary, retry) {
-  const a = primary && typeof primary === 'object' ? primary : {};
-  const b = retry && typeof retry === 'object' ? retry : {};
-  const patchA = a.draftPatch && typeof a.draftPatch === 'object' ? a.draftPatch : {};
-  const patchB = b.draftPatch && typeof b.draftPatch === 'object' ? b.draftPatch : {};
-  const draftPatch = { ...patchA };
-  if (patchB.title && !patchA.title) draftPatch.title = patchB.title;
-  if (patchB.task && !patchA.task) draftPatch.task = patchB.task;
-  if (patchB.classification && !patchA.classification) draftPatch.classification = patchB.classification;
-  for (const key of CONTENT_GAP_KEYS) {
-    const merged = mergeProvenancedLists(patchA[key], patchB[key]);
-    if (merged?.length) draftPatch[key] = merged;
-    else delete draftPatch[key];
-  }
-  if (Array.isArray(patchB.gaps) && patchB.gaps.length) {
-    draftPatch.gaps = patchB.gaps;
-  } else if (Array.isArray(patchA.gaps) && patchA.gaps.length) {
-    draftPatch.gaps = patchA.gaps;
-  }
-  const chipsA = Array.isArray(a.followUpChips) ? a.followUpChips : [];
-  const chipsB = Array.isArray(b.followUpChips) ? b.followUpChips : [];
-  const followUpChips = chipsB.length ? chipsB : chipsA;
-  return {
-    ...a,
-    mode: 'draft',
-    draftPatch,
-    followUpChips,
-    debug: {
-      ...(a.debug && typeof a.debug === 'object' ? a.debug : {}),
-      ...(b.debug && typeof b.debug === 'object' ? b.debug : {}),
-      englishDraftRetry: true,
-    },
-  };
 }
 
 /** Thin normalize: drop schema placeholders and non-English draft lines; keep provenanced EN lines. */
@@ -773,19 +718,6 @@ function assistantMessageEchoesOwner(assistantMessage, ownerText) {
       if (overlap >= 0.35 && !CONSULTANT_CUE.test(assistantMessage)) return true;
     }
   }
-  // Same-language soft paraphrase: long reply overlapping owner words, no consulting cue.
-  // (Do not use bare "нужн" as a cue — it matches owner briefs like "Нужно …".)
-  if (
-    assistant.length >= 80
-    && !CONSULTANT_CUE.test(assistantMessage)
-    && ownerUsesCyrillic(ownerText) === ownerUsesCyrillic(assistantMessage)
-  ) {
-    const ownerWords = owner.split(' ').filter((w) => w.length > 4);
-    if (ownerWords.length >= 5) {
-      const hit = ownerWords.filter((w) => assistant.includes(w)).length;
-      if (hit / ownerWords.length >= 0.25) return true;
-    }
-  }
   return false;
 }
 
@@ -802,13 +734,6 @@ function assistantEchoesAnyOwnerBrief(assistantMessage, messages, latestUserMess
   }
   return false;
 }
-
-const GAP_SECTION_LABEL_RU = {
-  deliverables: 'Сдаваемое',
-  acceptance: 'Приёмка',
-  proof: 'Доказательство',
-  outOfScope: 'Вне скоупа',
-};
 
 const CONTENT_GAP_KEYS = ['deliverables', 'acceptance', 'proof'];
 
@@ -856,87 +781,11 @@ export function buildOpenGapsNudge(openGaps) {
     'Extract concrete work products from facts into deliverables[] with sourceFactIds when named.',
     'For remaining open gaps (especially acceptance/proof), return 1-3 followUpChips that close reviewability holes: concrete proposals with label (owner language) + value (English draft line) + section.',
     'Section targeting: format/size/package → deliverables; tone/style/quality → acceptance; submission evidence → proof.',
-    'Completeness proposals on chips are encouraged (format, size e.g. 512x512, zip, screenshots, style match) even if absent from facts. Do NOT write those into draftPatch until Confirm.',
+    'Completeness proposals on chips are encouraged but MUST be strictly grounded in the DOMAIN PROFILE. Do NOT write those into draftPatch until Confirm.',
   ].join(' ');
 }
 
-function buildGapRetryCorrection(openGaps) {
-  const gaps = Array.isArray(openGaps) ? openGaps.filter(Boolean) : [];
-  const needChips = gaps.filter((gap) => gap === 'acceptance' || gap === 'proof' || gap === 'deliverables');
-  return [
-    'CORRECTION: previous JSON omitted usable followUpChips (questions do not count) and/or deliverables extraction while gaps remain open.',
-    gaps.length ? `Still open: ${gaps.join(', ')}.` : '',
-    needChips.length
-      ? `REQUIRED: 1-3 followUpChips with section in [${needChips.join(', ')}]. Each chip MUST include a non-question label AND an English value (draft line on Confirm). Completeness proposals OK — put format/size on deliverables (e.g. "All icons delivered as PNG 512x512"), tone/quality on acceptance, submission evidence on proof. Never What/How/Do you / "?". Never put those lines into draftPatch — only followUpChips.`
-      : '',
-    'Extract grounded deliverables with sourceFactIds when facts name artifacts.',
-    'Do NOT invent acceptance/proof into draftPatch. Keep mode "draft". Return ONLY the corrected JSON object.',
-  ]
-    .filter(Boolean)
-    .join(' ');
-}
 
-/** True when draft turn left gaps open and shipped no chips — one LLM retry allowed. */
-export function shouldRetryGapProposals(output, input) {
-  if (!output || output.mode !== 'draft') return false;
-  const chips = Array.isArray(output.followUpChips) ? output.followUpChips : [];
-  if (chips.length > 0) return false;
-  return resolveOpenContentGaps(output.draftPatch, input?.sectionDraft).length > 0;
-}
-
-function mergeProvenancedLists(primaryList, retryList) {
-  const primary = Array.isArray(primaryList) ? primaryList : [];
-  const retry = Array.isArray(retryList) ? retryList : [];
-  if (!retry.length) return primary.length ? primary : undefined;
-  if (!primary.length) return retry;
-  const seen = new Set(primary.map((line) => String(line?.text || '').trim().toLowerCase()).filter(Boolean));
-  const merged = [...primary];
-  for (const line of retry) {
-    const text = String(line?.text || '').trim();
-    if (!text || !Array.isArray(line?.sourceFactIds) || !line.sourceFactIds.length) continue;
-    const key = text.toLowerCase();
-    if (seen.has(key)) continue;
-    seen.add(key);
-    merged.push(line);
-  }
-  return merged;
-}
-
-/** Prefer retry chips; merge grounded deliverables; keep primary task/classification unless retry adds. */
-export function mergeGapRetryTurn(primary, retry) {
-  const a = primary && typeof primary === 'object' ? primary : {};
-  const b = retry && typeof retry === 'object' ? retry : {};
-  const patchA = a.draftPatch && typeof a.draftPatch === 'object' ? a.draftPatch : {};
-  const patchB = b.draftPatch && typeof b.draftPatch === 'object' ? b.draftPatch : {};
-  const draftPatch = { ...patchA };
-  if (patchB.title && !patchA.title) draftPatch.title = patchB.title;
-  if (patchB.task && !patchA.task) draftPatch.task = patchB.task;
-  if (patchB.classification && !patchA.classification) draftPatch.classification = patchB.classification;
-  for (const key of CONTENT_GAP_KEYS) {
-    const merged = mergeProvenancedLists(patchA[key], patchB[key]);
-    if (merged?.length) draftPatch[key] = merged;
-    else delete draftPatch[key];
-  }
-  if (Array.isArray(patchB.gaps) && patchB.gaps.length) {
-    draftPatch.gaps = patchB.gaps;
-  } else if (Array.isArray(patchA.gaps) && patchA.gaps.length) {
-    draftPatch.gaps = patchA.gaps;
-  }
-  const chipsA = Array.isArray(a.followUpChips) ? a.followUpChips : [];
-  const chipsB = Array.isArray(b.followUpChips) ? b.followUpChips : [];
-  const followUpChips = chipsB.length ? chipsB : chipsA;
-  return {
-    ...a,
-    mode: 'draft',
-    draftPatch,
-    followUpChips,
-    debug: {
-      ...(a.debug && typeof a.debug === 'object' ? a.debug : {}),
-      ...(b.debug && typeof b.debug === 'object' ? b.debug : {}),
-      gapProposalRetry: true,
-    },
-  };
-}
 
 /** Honest ack from what actually shipped — never promise chips that are absent. */
 export function buildHonestAssistantAck(ownerText, draftPatch, followUpChips) {
@@ -1089,18 +938,6 @@ export function buildChipContinuationAck(ownerText, sectionDraft, draftPatch, fo
   return buildHonestAssistantAck(ownerText, draftPatch, followUpChips);
 }
 
-/** EN stubs / vague clarifies that must never ship to a RU (or any) owner as the main ack. */
-export function isWeakConsultantAck(assistantMessage) {
-  const msg = String(assistantMessage || '').trim();
-  if (!msg || msg === '__composer_needs_ack__') return true;
-  if (/^(draft updated|check the sections)/i.test(msg)) return true;
-  if (/what about/i.test(msg)) return true;
-  if (/can we clarify/i.test(msg)) return true;
-  if (/what should we clarify/i.test(msg)) return true;
-  if (/still needed:/i.test(msg) && /\?$/.test(msg)) return true;
-  return false;
-}
-
 /**
  * True when label/value is an open question — not a Confirm-able proposal.
  */
@@ -1114,27 +951,19 @@ export function isQuestionChipText(text) {
 }
 
 /**
- * Keep chips usable as Confirm-able proposals.
- * Drop questions / Add-prompts. RU owner + EN-only label → RU shell + full EN body (no ellipsis).
- * Draft gap chips with section need an English value (proposal line).
- * Drop stacked transparency contradictions in one turn.
+ * Keep chips usable as Confirm-able proposals on a pure contract.
+ * Preserves schema validity: non-empty label, non-question, English value for section proposals.
  */
-export function filterContourChips(followUpChips, ownerText) {
+export function filterContourChips(followUpChips) {
   const list = Array.isArray(followUpChips) ? followUpChips : [];
-  const ownerRu = ownerUsesCyrillic(ownerText);
   const mapped = list
     .map((chip) => {
       if (!chip || typeof chip !== 'object') return null;
-      let label = String(chip.label || '').trim();
+      const label = String(chip.label || '').trim();
       let value = String(chip.value || '').trim();
       const section = String(chip.section || '').trim();
-      if (!label || label.length < 3) return null;
+      if (!label || label.length < 2) return null;
       if (isQuestionChipText(label) || isQuestionChipText(value)) return null;
-      if (
-        /^(add|require|request|specify|define|указать|добавить|требуй)\b/i.test(label)
-      ) {
-        return null;
-      }
       // Section chips must be lockable proposals: English value required (or EN label as value).
       if (CHIP_SECTIONS.has(section)) {
         if (!value) {
@@ -1142,13 +971,6 @@ export function filterContourChips(followUpChips, ownerText) {
           if (labelIsEnOnly) value = label;
         }
         if (!value || isQuestionChipText(value) || /[а-яё]/i.test(value)) return null;
-      }
-      const labelIsEnOnly = !/[а-яё]/i.test(label) && /[a-z]/i.test(label);
-      if (ownerRu && labelIsEnOnly) {
-        const shell = GAP_SECTION_LABEL_RU[section] || 'Вариант';
-        label = `${shell}: ${label}`;
-      } else if (!value && !/[а-яё]/i.test(label)) {
-        value = label;
       }
       return {
         label,
@@ -1158,21 +980,7 @@ export function filterContourChips(followUpChips, ownerText) {
     })
     .filter(Boolean);
 
-  return dropContradictoryTransparencyChips(mapped).slice(0, 6);
-}
-
-/** If both "no transparency" and "transparent background" appear, keep the no-transparency set. */
-export function dropContradictoryTransparencyChips(chips) {
-  const list = Array.isArray(chips) ? chips : [];
-  const valueOf = (chip) => String(chip?.value || chip?.label || '').toLowerCase();
-  const isNoTrans = (chip) => /no transparency|without transparency|opaque\b/i.test(valueOf(chip));
-  const isTransBg = (chip) =>
-    /transparent background|with transparency|alpha channel/i.test(valueOf(chip))
-    && !isNoTrans(chip);
-  const hasNo = list.some(isNoTrans);
-  const hasYes = list.some(isTransBg);
-  if (!hasNo || !hasYes) return list;
-  return list.filter((chip) => !isTransBg(chip));
+  return mapped.slice(0, 6);
 }
 
 function draftPatchHasContent(draftPatch) {
@@ -1226,19 +1034,20 @@ export function parseComposerLlmRawResponse(rawText, latestUserMessage = '', opt
         }))
         .filter((c) => c.label.length >= 2)
         .slice(0, 6)
-    : filterContourChips(rawChips, firstOwner);
+    : filterContourChips(rawChips);
   const nonEnglishChipValuesDropped = rawChips.some((chip) => {
     const value = String(chip?.value || '').trim();
     return value && isMostlyNonEnglishDraftText(value);
   }) && followUpChips.length < rawChips.length;
   let assistantMessage = String(normalized.assistantMessage || '').trim();
   const needsAck =
-    isWeakConsultantAck(assistantMessage)
+    !assistantMessage
+    || assistantMessage === '__composer_needs_ack__'
     || assistantEchoesAnyOwnerBrief(assistantMessage, messages, latestUserMessage)
     || assistantWrongLanguage(assistantMessage, firstOwner);
 
   if (isGlyphWorkspace) {
-    if (!assistantMessage || isWeakConsultantAck(assistantMessage)) {
+    if (!assistantMessage) {
       assistantMessage = ownerUsesCyrillic(firstOwner)
         ? 'Сформулировал арт-директиву для глифов. Проверьте карточку предложения и нажмите "Apply to Glyph Forge", чтобы передать параметры воркерам.'
         : 'Formulated art directive for glyphs. Review the proposal card and click "Apply to Glyph Forge" to send to DePIN workers.';
@@ -1276,7 +1085,7 @@ export function parseComposerLlmRawResponse(rawText, latestUserMessage = '', opt
   };
 }
 
-function buildComposerTurnUserContent(input, latestUserMessage, extraTail = '') {
+export function buildComposerTurnUserContent(input, latestUserMessage, extraTail = '') {
   if (input?.hints?.workspace === 'ai_glyphs') {
     return [
       latestUserMessage
@@ -1304,6 +1113,54 @@ function buildComposerTurnUserContent(input, latestUserMessage, extraTail = '') 
   ]
     .filter(Boolean)
     .join('\n\n');
+}
+
+/**
+ * Deterministic repair of composer output on a pure contract.
+ * Fills missing gap chips from domain profiles and ensures clean schema without triggering LLM retries.
+ */
+export function repairComposerOutput(output, input = {}) {
+  if (!output || typeof output !== 'object') return output;
+  if (output.mode !== 'draft') return output;
+
+  const domainId =
+    output?.draftPatch?.classification?.domainId ||
+    input?.hints?.classifiedDomainId ||
+    input?.hints?.taxonomy?.domainId ||
+    input?.sectionDraft?.classification?.domainId;
+
+  const chips = Array.isArray(output.followUpChips) ? output.followUpChips : [];
+  if (chips.length === 0) {
+    const openGaps = resolveOpenContentGaps(output.draftPatch, input?.sectionDraft);
+    if (openGaps.length > 0) {
+      const ownerText =
+        resolveFirstUserMessage(input?.messages) ||
+        resolveLatestUserMessage(input?.messages) ||
+        '';
+      const ownerUsesRu = ownerUsesCyrillic(ownerText);
+      output.followUpChips = buildDomainChipsForGaps(domainId, openGaps, ownerUsesRu);
+    }
+  }
+
+  const firstOwner =
+    resolveFirstUserMessage(input?.messages) ||
+    resolveLatestUserMessage(input?.messages) ||
+    '';
+  const nonEnglishDrops = Array.isArray(output.debug?.nonEnglishDraftDrops)
+    ? output.debug.nonEnglishDraftDrops
+    : [];
+  const taskDropped = nonEnglishDrops.some((drop) => drop?.section === 'task');
+  if (taskDropped && !output.draftPatch?.task) {
+    output.assistantMessage = buildEnglishDraftRejectAck(firstOwner);
+  } else if (!output.assistantMessage) {
+    output.assistantMessage = buildHonestAssistantAck(
+      firstOwner,
+      output.draftPatch,
+      output.followUpChips,
+    );
+  }
+
+  return output;
 }
 
 export async function runComposerLlmTurn(input, options = {}) {
@@ -1345,87 +1202,10 @@ export async function runComposerLlmTurn(input, options = {}) {
   });
 
   let output = parseComposerLlmRawResponse(raw, latestUserMessage, parseOptions);
-  const firstOwner = resolveFirstUserMessage(input.messages) || latestUserMessage;
   const isGlyphWorkspace = input?.hints?.workspace === 'ai_glyphs';
 
-  if (!isGlyphWorkspace && shouldRetryEnglishDraft(output)) {
-    const drops = Array.isArray(output.debug?.nonEnglishDraftDrops)
-      ? output.debug.nonEnglishDraftDrops
-      : [];
-    const previousJson = JSON.stringify({
-      mode: output.mode,
-      draftPatch: output.draftPatch,
-      followUpChips: output.followUpChips,
-      droppedNonEnglish: drops,
-    });
-    const retryMessages = [
-      { role: 'system', content: systemContent },
-      {
-        role: 'user',
-        content: buildComposerTurnUserContent(
-          input,
-          latestUserMessage,
-          [
-            buildEnglishDraftRetryCorrection(drops),
-            `PREVIOUS_JSON (non-English draft rejected — fix it):\n${previousJson}`,
-          ].join('\n\n'),
-        ),
-      },
-    ];
-    const retryRaw = await chat({
-      messages: retryMessages,
-      temperature: config.temperature,
-      maxTokens: config.maxTokens,
-    });
-    const retryOutput = parseComposerLlmRawResponse(retryRaw, latestUserMessage, parseOptions);
-    output = mergeEnglishRetryTurn(output, retryOutput);
-    if (shouldRetryEnglishDraft(output) && !output.draftPatch?.task) {
-      output.assistantMessage = buildEnglishDraftRejectAck(firstOwner);
-    } else {
-      output.assistantMessage = buildHonestAssistantAck(
-        firstOwner,
-        output.draftPatch,
-        output.followUpChips,
-      );
-    }
-  }
-
-  const skipGapRetryAfterEnglishReject =
-    Boolean(output.debug?.englishDraftRetry) && !output.draftPatch?.task;
-
-  if (!isGlyphWorkspace && !skipGapRetryAfterEnglishReject && shouldRetryGapProposals(output, input)) {
-    const openGaps = resolveOpenContentGaps(output.draftPatch, input.sectionDraft);
-    const previousJson = JSON.stringify({
-      mode: output.mode,
-      draftPatch: output.draftPatch,
-      followUpChips: output.followUpChips,
-    });
-    const retryMessages = [
-      { role: 'system', content: systemContent },
-      {
-        role: 'user',
-        content: buildComposerTurnUserContent(
-          input,
-          latestUserMessage,
-          [
-            buildGapRetryCorrection(openGaps),
-            `PREVIOUS_JSON (incomplete — fix it):\n${previousJson}`,
-          ].join('\n\n'),
-        ),
-      },
-    ];
-    const retryRaw = await chat({
-      messages: retryMessages,
-      temperature: config.temperature,
-      maxTokens: config.maxTokens,
-    });
-    const retryOutput = parseComposerLlmRawResponse(retryRaw, latestUserMessage, parseOptions);
-    output = mergeGapRetryTurn(output, retryOutput);
-    output.assistantMessage = buildHonestAssistantAck(
-      firstOwner,
-      output.draftPatch,
-      output.followUpChips,
-    );
+  if (!isGlyphWorkspace) {
+    output = repairComposerOutput(output, input);
   }
 
   const artDirective = isGlyphWorkspace ? extractArtDirectiveFromOutput(output) : undefined;

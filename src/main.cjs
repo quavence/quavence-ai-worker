@@ -1667,6 +1667,7 @@ async function spawnWorkerProcess(config) {
     AI_NODE_API_URL: String(config.apiUrl || '').trim(),
     AI_NODE_TOKEN: runtimeToken,
     AI_WORKER_DEVICE_ID: String(config.deviceId || ensureWorkerDeviceId(config)).trim(),
+    AI_WORKER_HARDWARE_FINGERPRINT: String(buildHardwareFingerprint()).trim(),
     AI_WORKER_DEVICE_ID_FILE: path.join(app.getPath('userData'), 'ai-worker-device-id'),
     AI_WORKER_COUNTRY_CODE: String(config.countryCode || '').trim(),
     AI_WORKER_COUNTRY_NAME: String(config.countryName || '').trim(),
