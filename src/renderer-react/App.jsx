@@ -64,7 +64,15 @@ const OVERVIEW_REFRESH_MS = 45000;
 const RUNTIME_REVALIDATE_MS = 12000;
 const DEFAULT_REWARD_ASSET = 'QVNC';
 const ALLOWED_GEN_MODELS_BY_PROVIDER = {
-  ollama: ['phi3:latest'],
+  ollama: [
+    'qwen/qwen3-vl-8b',
+    'qwen3-vl:8b',
+    'qwen3:8b',
+    'qwen2.5-7b-instruct',
+    'qwen2.5-coder-7b-instruct',
+    'mistral:latest',
+    'phi3:latest'
+  ],
   openai_compat: ['qwen/qwen3-vl-8b', 'mistral-7b-instruct-v0.3', 'mistral:latest', 'phi3:latest', 'qwen2.5-7b-instruct', 'qwen2.5-coder-7b-instruct']
 };
 

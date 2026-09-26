@@ -1,6 +1,6 @@
 {
   "name": "quavence-ai-worker-desktop",
-  "version": "1.0.1",
+  "version": "1.0.3",
   "private": false,
   "description": "Desktop launcher for Quavence AI Worker",
   "author": "Quavence DAO",
@@ -23,7 +23,8 @@
     "verify:dist": "node tools/verify_packaged_worker_artifact.mjs",
     "smoke:installer-copy": "node tools/smoke_installer_copy.mjs",
     "smoke:ipc": "node tools/smoke_ipc_handlers.mjs",
-    "smoke:lifecycle-start-idempotent": "node tools/smoke_lifecycle_start_idempotent.mjs"
+    "smoke:lifecycle-start-idempotent": "node tools/smoke_lifecycle_start_idempotent.mjs",
+    "smoke:reasoning": "node tools/smoke_reasoning_and_thinking_strip.mjs"
   },
   "devDependencies": {
     "@vitejs/plugin-react": "^4.3.4",

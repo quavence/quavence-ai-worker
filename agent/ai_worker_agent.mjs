@@ -455,6 +455,12 @@ function getOllamaBackoffMs(attempt) {
   return Math.min(2000 * attempt, 8000);
 }
 
+function stripThinkingBlocks(text) {
+  const source = String(text || '').trim();
+  if (!source) return '';
+  return source.replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
+}
+
 async function callOllamaOnce(prompt, options = {}) {
   const system = options.systemPrompt || undefined;
   const res = await requestJson(
@@ -489,7 +495,7 @@ async function callOllamaOnce(prompt, options = {}) {
   if (!text) {
     throw new Error('Ollama returned empty response');
   }
-  return text;
+  return stripThinkingBlocks(text);
 }
 
 async function callOllama(prompt, options = {}) {
@@ -614,7 +620,9 @@ async function callOpenAICompatOnce(prompt, options = {}) {
     ...(options.presence_penalty !== undefined ? { presence_penalty: options.presence_penalty } : {}),
     ...(options.frequency_penalty !== undefined ? { frequency_penalty: options.frequency_penalty } : {}),
     max_tokens: options.max_tokens || OPENAI_COMPAT_MAX_TOKENS,
-    stream: false
+    stream: false,
+    enable_thinking: false,
+    chat_template_kwargs: { enable_thinking: false }
   });
 
   const callEndpoint = async (payload) => requestJson(
@@ -632,11 +640,21 @@ async function callOpenAICompatOnce(prompt, options = {}) {
 
     if (res.ok) {
       const payload = res?.data || {};
-      const text = String(payload?.choices?.[0]?.message?.content || '').trim();
+      const choice = payload?.choices?.[0];
+      const message = choice?.message || {};
+      let text = String(message?.content || '').trim();
       if (!text) {
-        throw new Error('OpenAI-compatible endpoint returned empty response');
+        if (message.reasoning_content) {
+          text = String(message.reasoning_content).trim();
+        } else if (message.reasoning) {
+          text = String(message.reasoning).trim();
+        }
       }
-      return text;
+      if (!text) {
+        const finishReason = choice?.finish_reason ? ` (finish_reason: ${choice.finish_reason})` : '';
+        throw new Error(`OpenAI-compatible endpoint returned empty response${finishReason}`);
+      }
+      return stripThinkingBlocks(text);
     }
 
     if (Number(res.status) !== 400) {
@@ -746,8 +764,9 @@ function extractLikelyJsonObject(text) {
 }
 
 function parseJsonCandidate(text, fallback = null) {
-  const fenced = text.match(/```json\s*([\s\S]*?)```/i);
-  const rawCandidate = (fenced ? fenced[1] : text || '').trim();
+  const cleaned = stripThinkingBlocks(text);
+  const fenced = cleaned.match(/```json\s*([\s\S]*?)```/i);
+  const rawCandidate = (fenced ? fenced[1] : cleaned || '').trim();
   const candidate = extractLikelyJsonObject(rawCandidate) || rawCandidate;
   try {
     const parsed = JSON.parse(candidate);

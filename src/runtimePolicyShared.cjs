@@ -170,12 +170,12 @@ const RUNTIME_MISMATCH_LABELS = {
   embedding_model_missing: 'Embedding model not reported',
   embedding_model_mismatch: 'Embedding model does not match Hub policy',
   policy_version_mismatch: 'Runtime policy version is outdated — restart worker after Hub update',
-  detected_generation_model_missing: 'LM Studio generation model id not reported',
-  detected_generation_model_mismatch: 'LM Studio generation model does not match Hub policy',
-  detected_embedding_model_missing: 'LM Studio embedding model id not reported',
-  detected_embedding_model_mismatch: 'LM Studio embedding model does not match Hub policy',
-  detected_generation_model_changed_since_claim: 'LM Studio generation model changed since claim',
-  detected_embedding_model_changed_since_claim: 'LM Studio embedding model changed since claim',
+  detected_generation_model_missing: 'Local LLM generation model id not reported',
+  detected_generation_model_mismatch: 'Local LLM generation model does not match Hub policy',
+  detected_embedding_model_missing: 'Local LLM embedding model id not reported',
+  detected_embedding_model_mismatch: 'Local LLM embedding model does not match Hub policy',
+  detected_generation_model_changed_since_claim: 'Local LLM generation model changed since claim',
+  detected_embedding_model_changed_since_claim: 'Local LLM embedding model changed since claim',
 };
 
 function formatRuntimeMismatchLabels(codes) {
@@ -187,6 +187,7 @@ function formatRuntimeMismatchLabels(codes) {
 function buildRuntimePolicyIssues(policy, { provider, generationOk, embeddingOk, reachable, availableIds } = {}) {
   if (!policy?.enabled || policy.mode === 'off') return [];
   const issues = [];
+  const providerLabel = String(provider || '').trim().toLowerCase() === 'ollama' ? 'Ollama' : 'LM Studio';
   if (String(provider || '').trim().toLowerCase() !== String(policy.provider || '').trim().toLowerCase()) {
     issues.push({
       kind: 'provider',
@@ -197,13 +198,13 @@ function buildRuntimePolicyIssues(policy, { provider, generationOk, embeddingOk,
   if (!reachable) {
     issues.push({
       kind: 'offline',
-      message: 'Local LM Studio / OpenAI-compatible endpoint is offline',
+      message: `Local ${providerLabel} endpoint is offline`,
     });
   }
   if (!generationOk) {
     issues.push({
       kind: 'generation',
-      message: `Load generation model ${policy.generation_model} in LM Studio`,
+      message: `Load generation model ${policy.generation_model} in ${providerLabel}`,
       required: policy.generation_model,
       detected: resolveListedModelId(policy.generation_model, availableIds),
     });
@@ -211,7 +212,7 @@ function buildRuntimePolicyIssues(policy, { provider, generationOk, embeddingOk,
   if (!embeddingOk) {
     issues.push({
       kind: 'embedding',
-      message: `Load embedding model ${policy.embedding_model} in LM Studio`,
+      message: `Load embedding model ${policy.embedding_model} in ${providerLabel}`,
       required: policy.embedding_model,
       detected: resolveListedModelId(policy.embedding_model, availableIds),
     });

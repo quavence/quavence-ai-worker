@@ -2,8 +2,12 @@
   "qwen/qwen3-vl-8b": [
     "qwen/qwen3-vl-8b",
     "qwen3-vl-8b",
+    "qwen3-vl:8b",
+    "qwen/qwen3-vl:8b",
+    "qwen3-vl:latest",
     "qwen/qwen3-8b",
     "qwen3-8b",
+    "qwen3:8b",
     "qwen/qwen3-vl-8b-instruct",
     "qwen/qwen3-vl-8b-gguf",
     "qwen3-vl-8b-gguf",
@@ -14,6 +18,9 @@
   "text-embedding-nomic-embed-text-v2-moe": [
     "text-embedding-nomic-embed-text-v2-moe",
     "nomic-embed-text-v2-moe",
+    "nomic-embed-text-v2-moe:latest",
+    "nomic-embed-text:latest",
+    "nomic-embed-text",
     "nomic-ai/text-embedding-nomic-embed-text-v2-moe",
     "nomic-ai/text-embedding-nomic-embed-text-v2-moe-gguf",
     "text-embedding-nomic-embed-text-v2-moe-gguf"
