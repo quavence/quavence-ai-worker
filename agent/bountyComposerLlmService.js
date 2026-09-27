@@ -1251,13 +1251,24 @@ export function buildComposerTurnInputPayload(input = {}) {
       }))
       .filter((message) => message.content)
     : [];
+  let hints = input.hints ? { ...input.hints } : null;
+  if (hints?.taxonomy && Array.isArray(hints.taxonomy.tags)) {
+    hints = {
+      ...hints,
+      taxonomy: {
+        ...hints.taxonomy,
+        tags: hints.taxonomy.tags.map((t) => (typeof t === 'string' ? t : t?.id)).filter(Boolean),
+      },
+    };
+  }
+
   return {
     messages,
     facts: Array.isArray(input.facts) ? input.facts : [],
     confirmed: input.confirmed || null,
     sectionDraft: input.sectionDraft || null,
     validation: input.validation || null,
-    hints: input.hints || null,
+    hints,
   };
 }
 

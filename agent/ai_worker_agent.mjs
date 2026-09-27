@@ -360,6 +360,20 @@ function networkErrorMessage(error) {
     : errorMessage;
 }
 
+const sharedHttpsAgent = new https.Agent({
+  keepAlive: true,
+  keepAliveMsecs: 30000,
+  maxSockets: 20,
+  timeout: 60000,
+});
+
+const sharedHttpAgent = new http.Agent({
+  keepAlive: true,
+  keepAliveMsecs: 30000,
+  maxSockets: 20,
+  timeout: 60000,
+});
+
 function requestJson(method, urlString, headers = {}, body = null, timeoutMs = 15000) {
   return new Promise((resolve, reject) => {
     const url = new URL(urlString);
@@ -375,6 +389,7 @@ function requestJson(method, urlString, headers = {}, body = null, timeoutMs = 1
         method,
         family: 4,
         servername: url.hostname,
+        agent: url.protocol === 'https:' ? sharedHttpsAgent : sharedHttpAgent,
         headers: {
           ...headers,
           ...(payload ? { 'Content-Length': Buffer.byteLength(payload) } : {})
@@ -721,6 +736,186 @@ async function callLlm(prompt, options = {}) {
   return callOllama(prompt, options);
 }
 
+function requestStream(method, urlString, headers = {}, body = null, timeoutMs = 120000, onLineChunk) {
+  return new Promise((resolve, reject) => {
+    const url = new URL(urlString);
+    const transport = url.protocol === 'https:' ? https : http;
+    const payload = body ? JSON.stringify(body) : null;
+
+    const req = transport.request(
+      {
+        protocol: url.protocol,
+        hostname: url.hostname,
+        port: url.port || undefined,
+        path: `${url.pathname}${url.search}`,
+        method,
+        family: 4,
+        servername: url.hostname,
+        headers: {
+          ...headers,
+          ...(payload ? { 'Content-Length': Buffer.byteLength(payload) } : {})
+        }
+      },
+      (res) => {
+        let buffer = '';
+        res.setEncoding('utf8');
+
+        res.on('data', (chunk) => {
+          buffer += chunk;
+          const lines = buffer.split('\n');
+          buffer = lines.pop(); // keep last incomplete line
+          for (const line of lines) {
+            const trimmed = line.trim();
+            if (trimmed) {
+              onLineChunk(trimmed);
+            }
+          }
+        });
+
+        res.on('end', () => {
+          if (buffer.trim()) {
+            onLineChunk(buffer.trim());
+          }
+          const status = Number(res.statusCode || 0);
+          resolve({
+            status,
+            ok: status >= 200 && status < 300,
+          });
+        });
+      }
+    );
+
+    req.setTimeout(timeoutMs, () => {
+      req.destroy(new Error('Streaming Connect Timeout Error'));
+    });
+    req.on('error', (error) => reject(error));
+
+    if (payload) {
+      req.write(payload);
+    }
+    req.end();
+  });
+}
+
+async function pushTaskStreamChunk({ taskId, claimNonce, seq, delta, type = 'chunk' }) {
+  try {
+    const payload = type === 'heartbeat'
+      ? { type: 'heartbeat', ts: Math.floor(Date.now() / 1000) }
+      : { seq, type: 'chunk', delta, ts: Math.floor(Date.now() / 1000) };
+
+    const headers = {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${NODE_TOKEN}`,
+      'X-Quavence-Claim-Nonce': String(claimNonce || ''),
+      'X-AI-Worker-Device-ID': WORKER_DEVICE_ID,
+      'X-AI-Worker-Hardware-Fingerprint': WORKER_HARDWARE_FINGERPRINT,
+    };
+
+    return await requestJson(
+      'POST',
+      `${API_BASE_URL}/api/ai/nodes/tasks/${taskId}/stream`,
+      headers,
+      payload,
+      10000
+    );
+  } catch (err) {
+    warn(`[stream-relay] Failed sending chunk (seq=${seq}) for task ${taskId}:`, err.message);
+    return { ok: false, error: err.message };
+  }
+}
+
+async function callOllamaStream(prompt, options = {}, onDelta) {
+  const system = options.systemPrompt || undefined;
+  let fullText = '';
+  const payload = {
+    model: OLLAMA_MODEL,
+    stream: true,
+    prompt,
+    ...(system ? { system } : {}),
+    options: {
+      temperature: options.temperature !== undefined ? options.temperature : 0,
+      top_p: 1,
+      num_predict: options.max_tokens || 2048,
+    }
+  };
+
+  const res = await requestStream(
+    'POST',
+    `${OLLAMA_BASE_URL}/api/generate`,
+    { 'Content-Type': 'application/json' },
+    payload,
+    OLLAMA_TIMEOUT_MS,
+    (line) => {
+      try {
+        const parsed = JSON.parse(line);
+        if (parsed.response) {
+          fullText += parsed.response;
+          onDelta(parsed.response);
+        }
+      } catch {}
+    }
+  );
+
+  if (!res.ok) {
+    throw new Error(`Ollama stream error status ${res.status}`);
+  }
+
+  return stripThinkingBlocks(fullText);
+}
+
+async function callOpenAICompatStream(prompt, options = {}, onDelta) {
+  const baseUrl = normalizeOpenAICompatBaseUrl(OPENAI_COMPAT_BASE_URL);
+  const headers = { 'Content-Type': 'application/json' };
+  if (OPENAI_COMPAT_API_KEY) {
+    headers.Authorization = `Bearer ${OPENAI_COMPAT_API_KEY}`;
+  }
+
+  const userPrompt = String(prompt || '');
+  const systemPrompt = options.systemPrompt || OPENAI_COMPAT_JSON_SYSTEM_PROMPT;
+  const useSystemRole = OPENAI_COMPAT_ROLE_MODE !== 'user_only';
+
+  const payload = {
+    model: activeGenerationModel,
+    messages: buildOpenAICompatMessages(systemPrompt, userPrompt, useSystemRole),
+    temperature: options.temperature !== undefined ? options.temperature : 0,
+    top_p: 1,
+    max_tokens: options.max_tokens || OPENAI_COMPAT_MAX_TOKENS,
+    stream: true,
+    enable_thinking: false,
+    chat_template_kwargs: { enable_thinking: false }
+  };
+
+  let fullText = '';
+
+  const res = await requestStream(
+    'POST',
+    `${baseUrl}/chat/completions`,
+    headers,
+    payload,
+    OLLAMA_TIMEOUT_MS,
+    (line) => {
+      if (line.startsWith('data:')) {
+        const dataStr = line.slice(5).trim();
+        if (dataStr === '[DONE]') return;
+        try {
+          const chunk = JSON.parse(dataStr);
+          const delta = chunk.choices?.[0]?.delta?.content || chunk.choices?.[0]?.delta?.reasoning_content || '';
+          if (delta) {
+            fullText += delta;
+            onDelta(delta);
+          }
+        } catch {}
+      }
+    }
+  );
+
+  if (!res.ok) {
+    throw new Error(`OpenAI-compatible stream error status ${res.status}`);
+  }
+
+  return stripThinkingBlocks(fullText);
+}
+
 function extractLikelyJsonObject(text) {
   const source = String(text || '').trim();
   if (!source) return '';
@@ -803,7 +998,72 @@ async function executeTask(task) {
     };
   }
 
-  const modelText = await callLlm(userPrompt, { systemPrompt });
+  const streamRequested = Boolean(
+    task?.stream_requested ||
+    task?.result_json?.stream_requested ||
+    task?.result_json?.stream
+  );
+
+  let modelText = '';
+  if (streamRequested) {
+    let seq = 1;
+    const claimNonce = String(task?.claim_nonce || '').trim();
+
+    const heartbeatTimer = setInterval(() => {
+      pushTaskStreamChunk({
+        taskId,
+        claimNonce,
+        type: 'heartbeat',
+      }).catch(() => {});
+    }, 10000);
+
+    const pendingDeltas = [];
+    let isFlushing = false;
+    let streamClosed = false;
+
+    const flushQueue = async () => {
+      if (isFlushing) return;
+      isFlushing = true;
+      try {
+        while (pendingDeltas.length > 0) {
+          const currentDelta = pendingDeltas.splice(0, pendingDeltas.length).join('');
+          if (!currentDelta) continue;
+          const currentSeq = seq++;
+          await pushTaskStreamChunk({
+            taskId,
+            claimNonce,
+            seq: currentSeq,
+            delta: currentDelta,
+          });
+        }
+      } catch (err) {
+        warn(`[stream] flush error: ${err.message}`);
+      } finally {
+        isFlushing = false;
+      }
+    };
+
+    try {
+      const onDelta = (delta) => {
+        if (!delta || streamClosed) return;
+        pendingDeltas.push(delta);
+        flushQueue().catch(() => {});
+      };
+
+      if (LLM_PROVIDER === 'openai_compat') {
+        modelText = await callOpenAICompatStream(userPrompt, { systemPrompt }, onDelta);
+      } else {
+        modelText = await callOllamaStream(userPrompt, { systemPrompt }, onDelta);
+      }
+      streamClosed = true;
+      await flushQueue();
+    } finally {
+      clearInterval(heartbeatTimer);
+    }
+  } else {
+    modelText = await callLlm(userPrompt, { systemPrompt });
+  }
+
   let parsed = parseJsonCandidate(modelText, null);
 
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
@@ -860,6 +1120,9 @@ async function heartbeat() {
   const payload = {
     device_id: WORKER_DEVICE_ID,
     hardware_fingerprint: WORKER_HARDWARE_FINGERPRINT,
+    capabilities: {
+      streaming: true,
+    },
   };
   if (WORKER_QVNC_ADDRESS) payload.qvnc_address = WORKER_QVNC_ADDRESS;
   if (WORKER_KEYPAIR?.publicKeyHex) payload.worker_pubkey = WORKER_KEYPAIR.publicKeyHex;
@@ -1005,6 +1268,9 @@ async function claimTask() {
     runtime_attestation: runtimeAttestation,
     device_id: WORKER_DEVICE_ID,
     hardware_fingerprint: WORKER_HARDWARE_FINGERPRINT,
+    capabilities: {
+      streaming: true,
+    },
   });
 
   if (res.status === 503) {
