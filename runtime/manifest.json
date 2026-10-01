@@ -1,0 +1,28 @@
+{
+  "schema": 1,
+  "runtime": {
+    "name": "ollama",
+    "platforms": {
+      "win32-x64": {
+        "binaryPath": "ollama.exe",
+        "source": {
+          "kind": "bundled_file",
+          "path": "ollama/ollama.exe",
+          "sha256": "403D9549775A84804EC4883699E0526F76DE164CBD8F71CDC190CAB9AA7E571E"
+        }
+      }
+    }
+  },
+  "models": [
+    {
+      "name": "phi3:latest",
+      "autoPull": true,
+      "role": "generation"
+    },
+    {
+      "name": "nomic-embed-text",
+      "autoPull": true,
+      "role": "embedding"
+    }
+  ]
+}

@@ -620,25 +620,37 @@ async function callOpenAICompatOnce(prompt, options = {}) {
 
   const userPrompt = String(prompt || '');
   const systemPrompt = options.systemPrompt || OPENAI_COMPAT_JSON_SYSTEM_PROMPT;
+  const hasTools = Array.isArray(options.tools) && options.tools.length > 0;
   let useSystemRole = OPENAI_COMPAT_ROLE_MODE !== 'user_only';
-  let withResponseFormat = true;
+  let withResponseFormat = !hasTools;
   let responseFormatRetryDone = false;
   let roleRetryDone = OPENAI_COMPAT_ROLE_MODE !== 'auto';
   let modelRetryDone = false;
 
-  const buildPayload = () => ({
-    model: activeGenerationModel,
-    messages: buildOpenAICompatMessages(systemPrompt, userPrompt, useSystemRole),
-    ...(withResponseFormat ? { response_format: { type: 'json_object' } } : {}),
-    temperature: options.temperature !== undefined ? options.temperature : 0,
-    top_p: 1,
-    ...(options.presence_penalty !== undefined ? { presence_penalty: options.presence_penalty } : {}),
-    ...(options.frequency_penalty !== undefined ? { frequency_penalty: options.frequency_penalty } : {}),
-    max_tokens: options.max_tokens || OPENAI_COMPAT_MAX_TOKENS,
-    stream: false,
-    enable_thinking: false,
-    chat_template_kwargs: { enable_thinking: false }
-  });
+  const buildPayload = () => {
+    let messagesPayload;
+    if (hasTools && Array.isArray(options.messages) && options.messages.length > 0) {
+      messagesPayload = options.messages;
+    } else {
+      messagesPayload = buildOpenAICompatMessages(systemPrompt, userPrompt, useSystemRole);
+    }
+
+    return {
+      model: activeGenerationModel,
+      messages: messagesPayload,
+      ...(withResponseFormat ? { response_format: { type: 'json_object' } } : {}),
+      ...(hasTools ? { tools: options.tools } : {}),
+      ...(hasTools && (options.tool_choice || options.toolChoice) ? { tool_choice: options.tool_choice || options.toolChoice } : {}),
+      temperature: options.temperature !== undefined ? options.temperature : 0,
+      top_p: 1,
+      ...(options.presence_penalty !== undefined ? { presence_penalty: options.presence_penalty } : {}),
+      ...(options.frequency_penalty !== undefined ? { frequency_penalty: options.frequency_penalty } : {}),
+      max_tokens: options.max_tokens || OPENAI_COMPAT_MAX_TOKENS,
+      stream: false,
+      enable_thinking: false,
+      chat_template_kwargs: { enable_thinking: false }
+    };
+  };
 
   const callEndpoint = async (payload) => requestJson(
     'POST',
@@ -657,6 +669,15 @@ async function callOpenAICompatOnce(prompt, options = {}) {
       const payload = res?.data || {};
       const choice = payload?.choices?.[0];
       const message = choice?.message || {};
+
+      if (Array.isArray(message.tool_calls) && message.tool_calls.length > 0) {
+        return {
+          tool_calls: message.tool_calls,
+          finish_reason: 'tool_calls',
+          content: message.content || null,
+        };
+      }
+
       let text = String(message?.content || '').trim();
       if (!text) {
         if (message.reasoning_content) {
@@ -729,6 +750,62 @@ async function callOpenAICompat(prompt, options = {}) {
   throw lastError || new Error('openai_compat request failed');
 }
 
+async function callOpenAICompatEmbeddingOnce(input, options = {}) {
+  const baseUrl = normalizeOpenAICompatBaseUrl(
+    LLM_PROVIDER === 'ollama' ? `${OLLAMA_BASE_URL}/v1` : OPENAI_COMPAT_BASE_URL
+  );
+  const headers = { 'Content-Type': 'application/json' };
+  if (OPENAI_COMPAT_API_KEY && LLM_PROVIDER !== 'ollama') {
+    headers.Authorization = `Bearer ${OPENAI_COMPAT_API_KEY}`;
+  }
+
+  const model = options.model
+    || runtimeAttestation?.detected_embedding_model
+    || runtimeAttestation?.embedding_model
+    || 'text-embedding-nomic-embed-text-v2-moe';
+
+  const payload = {
+    model,
+    input,
+    ...(options.encoding_format ? { encoding_format: options.encoding_format } : {}),
+    ...(options.dimensions ? { dimensions: options.dimensions } : {}),
+  };
+
+  const res = await requestJson(
+    'POST',
+    `${baseUrl}/embeddings`,
+    headers,
+    payload,
+    OLLAMA_TIMEOUT_MS
+  ).catch((error) => {
+    throw new Error(networkErrorMessage(error));
+  });
+
+  if (!res.ok) {
+    const errorMsg = res.data?.error?.message || res.data?.error || `status ${res.status}`;
+    throw new Error(`Embedding request failed (${res.status}): ${errorMsg}`);
+  }
+
+  return res.data;
+}
+
+async function callOpenAICompatEmbedding(input, options = {}) {
+  let lastError = null;
+  for (let attempt = 1; attempt <= OLLAMA_MAX_RETRIES; attempt += 1) {
+    try {
+      return await callOpenAICompatEmbeddingOnce(input, options);
+    } catch (error) {
+      lastError = error;
+      if (!isTransientNetworkError(error) || attempt >= OLLAMA_MAX_RETRIES) {
+        throw error;
+      }
+      warn(`openai_compat embedding request failed, retrying in ${getOllamaBackoffMs(attempt)}ms: ${error.message}`);
+      await sleep(getOllamaBackoffMs(attempt));
+    }
+  }
+  throw lastError || new Error('openai_compat embedding request failed');
+}
+
 async function callLlm(prompt, options = {}) {
   if (LLM_PROVIDER === 'openai_compat') {
     return callOpenAICompat(prompt, options);
@@ -797,11 +874,17 @@ function requestStream(method, urlString, headers = {}, body = null, timeoutMs =
   });
 }
 
-async function pushTaskStreamChunk({ taskId, claimNonce, seq, delta, type = 'chunk' }) {
+async function pushTaskStreamChunk({ taskId, claimNonce, seq, delta, tool_calls, type = 'chunk' }) {
   try {
     const payload = type === 'heartbeat'
       ? { type: 'heartbeat', ts: Math.floor(Date.now() / 1000) }
-      : { seq, type: 'chunk', delta, ts: Math.floor(Date.now() / 1000) };
+      : {
+          seq,
+          type: 'chunk',
+          delta,
+          ...(Array.isArray(tool_calls) && tool_calls.length > 0 ? { tool_calls } : {}),
+          ts: Math.floor(Date.now() / 1000),
+        };
 
     const headers = {
       'Content-Type': 'application/json',
@@ -873,10 +956,20 @@ async function callOpenAICompatStream(prompt, options = {}, onDelta) {
   const userPrompt = String(prompt || '');
   const systemPrompt = options.systemPrompt || OPENAI_COMPAT_JSON_SYSTEM_PROMPT;
   const useSystemRole = OPENAI_COMPAT_ROLE_MODE !== 'user_only';
+  const hasTools = Array.isArray(options.tools) && options.tools.length > 0;
+
+  let messagesPayload;
+  if (hasTools && Array.isArray(options.messages) && options.messages.length > 0) {
+    messagesPayload = options.messages;
+  } else {
+    messagesPayload = buildOpenAICompatMessages(systemPrompt, userPrompt, useSystemRole);
+  }
 
   const payload = {
     model: activeGenerationModel,
-    messages: buildOpenAICompatMessages(systemPrompt, userPrompt, useSystemRole),
+    messages: messagesPayload,
+    ...(hasTools ? { tools: options.tools } : {}),
+    ...(hasTools && (options.tool_choice || options.toolChoice) ? { tool_choice: options.tool_choice || options.toolChoice } : {}),
     temperature: options.temperature !== undefined ? options.temperature : 0,
     top_p: 1,
     max_tokens: options.max_tokens || OPENAI_COMPAT_MAX_TOKENS,
@@ -886,6 +979,7 @@ async function callOpenAICompatStream(prompt, options = {}, onDelta) {
   };
 
   let fullText = '';
+  const accumulatedToolCalls = [];
 
   const res = await requestStream(
     'POST',
@@ -900,7 +994,11 @@ async function callOpenAICompatStream(prompt, options = {}, onDelta) {
         try {
           const chunk = JSON.parse(dataStr);
           const delta = chunk.choices?.[0]?.delta?.content || chunk.choices?.[0]?.delta?.reasoning_content || '';
-          if (delta) {
+          const deltaToolCalls = chunk.choices?.[0]?.delta?.tool_calls;
+          if (Array.isArray(deltaToolCalls) && deltaToolCalls.length > 0) {
+            accumulatedToolCalls.push(...deltaToolCalls);
+            onDelta({ tool_calls: deltaToolCalls });
+          } else if (delta) {
             fullText += delta;
             onDelta(delta);
           }
@@ -911,6 +1009,14 @@ async function callOpenAICompatStream(prompt, options = {}, onDelta) {
 
   if (!res.ok) {
     throw new Error(`OpenAI-compatible stream error status ${res.status}`);
+  }
+
+  if (accumulatedToolCalls.length > 0) {
+    return {
+      tool_calls: accumulatedToolCalls,
+      finish_reason: 'tool_calls',
+      content: fullText || null,
+    };
   }
 
   return stripThinkingBlocks(fullText);
@@ -971,12 +1077,43 @@ function parseJsonCandidate(text, fallback = null) {
   }
 }
 
+async function executeEmbeddingTask(task) {
+  const taskId = task?.id;
+  const input = task?.input !== undefined
+    ? task.input
+    : (task?.result_json?.input !== undefined
+      ? task.result_json.input
+      : (task?.prompt || task?.result_json?.prompt || ''));
+
+  if (input === '' || (Array.isArray(input) && input.length === 0)) {
+    throw new Error(`Task ${taskId} has empty input for embedding`);
+  }
+
+  const model = task?.model || task?.result_json?.model;
+  const dimensions = task?.dimensions || task?.result_json?.dimensions;
+  const encoding_format = task?.encoding_format || task?.result_json?.encoding_format;
+
+  const result = await callOpenAICompatEmbedding(input, {
+    model,
+    dimensions,
+    encoding_format,
+  });
+
+  return result;
+}
+
 /**
  * Universal Dumb Runner: executes pre-assembled prompt received from Hub.
  * The worker is a pure inference relay with zero client-side prompt stitching or schema dicts.
  */
 async function executeTask(task) {
   const taskId = task?.id;
+  const taskType = String(task?.task_type || '').trim().toUpperCase();
+
+  if (taskType === 'TASK_EMBEDDING') {
+    return await executeEmbeddingTask(task);
+  }
+
   const userPrompt = String(
     task?.prompt ||
     task?.result_json?.prompt ||
@@ -1004,7 +1141,15 @@ async function executeTask(task) {
     task?.result_json?.stream
   );
 
-  let modelText = '';
+  const tools = Array.isArray(task?.tools)
+    ? task.tools
+    : (Array.isArray(task?.result_json?.tools) ? task.result_json.tools : undefined);
+  const toolChoice = task?.tool_choice || task?.result_json?.tool_choice || undefined;
+  const messages = Array.isArray(task?.messages)
+    ? task.messages
+    : (Array.isArray(task?.result_json?.messages) ? task.result_json.messages : undefined);
+
+  let modelResult = null;
   if (streamRequested) {
     let seq = 1;
     const claimNonce = String(task?.claim_nonce || '').trim();
@@ -1026,15 +1171,26 @@ async function executeTask(task) {
       isFlushing = true;
       try {
         while (pendingDeltas.length > 0) {
-          const currentDelta = pendingDeltas.splice(0, pendingDeltas.length).join('');
-          if (!currentDelta) continue;
+          const item = pendingDeltas.shift();
+          if (!item) continue;
           const currentSeq = seq++;
-          await pushTaskStreamChunk({
-            taskId,
-            claimNonce,
-            seq: currentSeq,
-            delta: currentDelta,
-          });
+          if (typeof item === 'object' && item.tool_calls) {
+            await pushTaskStreamChunk({
+              taskId,
+              claimNonce,
+              seq: currentSeq,
+              tool_calls: item.tool_calls,
+            });
+          } else {
+            const currentDelta = typeof item === 'string' ? item : (item.delta || '');
+            if (!currentDelta) continue;
+            await pushTaskStreamChunk({
+              taskId,
+              claimNonce,
+              seq: currentSeq,
+              delta: currentDelta,
+            });
+          }
         }
       } catch (err) {
         warn(`[stream] flush error: ${err.message}`);
@@ -1044,16 +1200,16 @@ async function executeTask(task) {
     };
 
     try {
-      const onDelta = (delta) => {
-        if (!delta || streamClosed) return;
-        pendingDeltas.push(delta);
+      const onDelta = (deltaOrFrame) => {
+        if (!deltaOrFrame || streamClosed) return;
+        pendingDeltas.push(deltaOrFrame);
         flushQueue().catch(() => {});
       };
 
       if (LLM_PROVIDER === 'openai_compat') {
-        modelText = await callOpenAICompatStream(userPrompt, { systemPrompt }, onDelta);
+        modelResult = await callOpenAICompatStream(userPrompt, { systemPrompt, tools, tool_choice: toolChoice, messages }, onDelta);
       } else {
-        modelText = await callOllamaStream(userPrompt, { systemPrompt }, onDelta);
+        modelResult = await callOllamaStream(userPrompt, { systemPrompt }, onDelta);
       }
       streamClosed = true;
       await flushQueue();
@@ -1061,9 +1217,20 @@ async function executeTask(task) {
       clearInterval(heartbeatTimer);
     }
   } else {
-    modelText = await callLlm(userPrompt, { systemPrompt });
+    modelResult = await callLlm(userPrompt, {
+      systemPrompt,
+      tools,
+      toolChoice,
+      messages,
+      task_type: task?.task_type,
+    });
   }
 
+  if (modelResult && typeof modelResult === 'object' && Array.isArray(modelResult.tool_calls)) {
+    return modelResult;
+  }
+
+  const modelText = typeof modelResult === 'string' ? modelResult : String(modelResult?.content || '');
   let parsed = parseJsonCandidate(modelText, null);
 
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
