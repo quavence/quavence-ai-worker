@@ -1154,20 +1154,28 @@ async function fetchLmStudioLoadedModels(baseUrl, apiKey = '') {
       headers.Authorization = `Bearer ${String(apiKey || '').trim()}`;
     }
     const res = await fetch(`${apiBase}/api/v0/models`, { method: 'GET', headers, signal: controller.signal });
-    if (!res.ok) return { supported: false, loaded: [] };
+    if (!res.ok) return { supported: false, loaded: [], modelContextLengths: {} };
     const payload = await res.json().catch(() => null);
     const models = Array.isArray(payload?.data) ? payload.data : null;
-    if (!models) return { supported: false, loaded: [] };
+    if (!models) return { supported: false, loaded: [], modelContextLengths: {} };
     const hasState = models.some((m) => typeof m?.state === 'string');
-    if (!hasState) return { supported: false, loaded: [] };
+    if (!hasState) return { supported: false, loaded: [], modelContextLengths: {} };
+    const modelContextLengths = {};
+    for (const m of models) {
+      const id = String(m?.id || '').trim();
+      if (!id) continue;
+      let ctx = Number(m?.loaded_context_length || m?.max_context_length || 0);
+      if (!Number.isFinite(ctx) || ctx <= 0) ctx = 8192;
+      modelContextLengths[id] = Math.max(512, Math.min(131072, Math.floor(ctx)));
+    }
     const loaded = models
       .filter((m) => String(m?.state || '').trim().toLowerCase() === 'loaded')
       .map((m) => String(m?.id || '').trim())
       .filter(Boolean)
       .sort((a, b) => a.localeCompare(b));
-    return { supported: true, loaded };
+    return { supported: true, loaded, modelContextLengths };
   } catch {
-    return { supported: false, loaded: [] };
+    return { supported: false, loaded: [], modelContextLengths: {} };
   } finally {
     clearTimeout(timeout);
   }
@@ -1215,7 +1223,7 @@ async function checkRuntime(config) {
 
     const loadState = reachable
       ? await fetchLmStudioLoadedModels(llmBaseUrl, llmApiKey)
-      : { supported: false, loaded: [] };
+      : { supported: false, loaded: [], modelContextLengths: {} };
     const isLoaded = (canonicalId) => {
       if (!loadState.supported) return true;
       const listedId = resolveListedModelId(canonicalId, availableModels) || String(canonicalId || '').trim();
@@ -1255,6 +1263,14 @@ async function checkRuntime(config) {
       ? resolveListedModelId(embedModel, availableModels)
       : null;
 
+    let maxContextTokens = 8192;
+    if (loadState.supported && loadState.modelContextLengths) {
+      const mappedId = resolveListedModelId(genModel, availableModels) || genModel;
+      if (loadState.modelContextLengths[mappedId]) {
+        maxContextTokens = loadState.modelContextLengths[mappedId];
+      }
+    }
+
     return {
       provider,
       mode: 'external',
@@ -1274,6 +1290,8 @@ async function checkRuntime(config) {
       runtimePolicyMismatches,
       detectedGenerationModel,
       detectedEmbeddingModel,
+      maxContextTokens,
+      modelContextLengths: loadState.modelContextLengths || {},
       policyEnforced: policyActive,
       requiredGenerationModel: policyActive ? policy.generation_model : null,
       requiredEmbeddingModel: policyActive ? policy.embedding_model : null,
@@ -1627,6 +1645,14 @@ async function spawnWorkerProcess(config) {
         throw new Error(`Embedding model "${embedModel}" is not listed on endpoint. Load it in LM Studio or clear the field.`);
       }
     }
+    let workerMaxContext = 8192;
+    const loadState = await fetchLmStudioLoadedModels(llmBaseUrl, llmApiKey);
+    if (loadState.supported && loadState.modelContextLengths) {
+      if (loadState.modelContextLengths[endpointGenModel]) {
+        workerMaxContext = loadState.modelContextLengths[endpointGenModel];
+      }
+    }
+
     endpointGenModel = resolveListedModelId(genModel, availableModels) || genModel;
     if (endpointGenModel !== genModel) {
       sendLog('info', `LM Studio exposes generation model as "${endpointGenModel}" (policy id "${genModel}")`);
@@ -1675,6 +1701,7 @@ async function spawnWorkerProcess(config) {
     AI_WORKER_LLM_PROVIDER: llmProvider,
     AI_WORKER_LLM_BASE_URL: normalizeOpenAICompatBaseUrl(config?.llmBaseUrl || DEFAULT_OPENAI_COMPAT_URL),
     AI_WORKER_LLM_MODEL: endpointGenModel,
+    AI_WORKER_LLM_MAX_CONTEXT_TOKENS: String(workerMaxContext || 8192),
     AI_WORKER_LLM_API_KEY: String(config?.llmApiKey || '').trim(),
     AI_WORKER_OPENAI_COMPAT_ROLE_MODE: normalizeOpenAICompatRoleMode(config?.openAiCompatRoleMode),
     AI_WORKER_QVNC_ADDRESS: String(config?.qvncAddress || '').trim(),

@@ -5,7 +5,8 @@ node_modules/
 dist/
 dist-renderer/
 release/
-build/
+build/*
+!build/installer.nsh
 *.exe
 *.blockmap
 builder-debug.yml

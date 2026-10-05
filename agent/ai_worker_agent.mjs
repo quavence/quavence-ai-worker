@@ -5,6 +5,7 @@ import https from 'node:https';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import {
   buildRuntimeAttestation,
   fetchHubRuntimePolicy,
@@ -834,10 +835,17 @@ function requestStream(method, urlString, headers = {}, body = null, timeoutMs =
         }
       },
       (res) => {
+        const status = Number(res.statusCode || 0);
+        const isError = status >= 400;
         let buffer = '';
+        let rawErrorBody = '';
         res.setEncoding('utf8');
 
         res.on('data', (chunk) => {
+          if (isError) {
+            rawErrorBody += chunk;
+            return;
+          }
           buffer += chunk;
           const lines = buffer.split('\n');
           buffer = lines.pop(); // keep last incomplete line
@@ -850,13 +858,13 @@ function requestStream(method, urlString, headers = {}, body = null, timeoutMs =
         });
 
         res.on('end', () => {
-          if (buffer.trim()) {
+          if (!isError && buffer.trim()) {
             onLineChunk(buffer.trim());
           }
-          const status = Number(res.statusCode || 0);
           resolve({
             status,
             ok: status >= 200 && status < 300,
+            errorBody: rawErrorBody.trim() || buffer.trim(),
           });
         });
       }
@@ -1008,7 +1016,10 @@ async function callOpenAICompatStream(prompt, options = {}, onDelta) {
   );
 
   if (!res.ok) {
-    throw new Error(`OpenAI-compatible stream error status ${res.status}`);
+    const errorDetail = res.errorBody ? `: ${res.errorBody}` : '';
+    const err = new Error(`OpenAI-compatible stream error status ${res.status}${errorDetail}`);
+    err.status = res.status;
+    throw err;
   }
 
   if (accumulatedToolCalls.length > 0) {
@@ -1575,8 +1586,60 @@ async function completeTask(taskId, taskType, claimNonce, resultJson) {
   return res?.data?.data || null;
 }
 
-function inferFailReasonCode(errorMessage) {
+export function isContextOverflowError(errorMessage, httpStatus = 0) {
+  const err = String(errorMessage || '').toLowerCase();
+  let status = Number(httpStatus || 0);
+  if (!status) {
+    const match = err.match(/(?:error|status|code)\s+(\d{3})/i);
+    if (match) status = Number(match[1]);
+  }
+
+  // 1. Direct llama.cpp / LM Studio markers
+  if (err.includes('n_ctx') || err.includes('n_keep')) {
+    return true;
+  }
+
+  // 2. Explicit context overflow
+  if (err.includes('context') && (
+    err.includes('overflow') ||
+    err.includes('exceed') ||
+    err.includes('too large') ||
+    err.includes('maximum context') ||
+    err.includes('context length')
+  )) {
+    return true;
+  }
+
+  // 3. Prompt length errors
+  if (err.includes('prompt') && (err.includes('too long') || err.includes('exceeds'))) {
+    return true;
+  }
+
+  // 4. Memory and KV cache (CUDA OOM during prefill)
+  if (status >= 400 || status === 0) {
+    if (err.includes('cuda out of memory')) {
+      return true;
+    }
+    if (err.includes('out of memory') && (
+      err.includes('kv cache') ||
+      err.includes('llama') ||
+      err.includes('cuda') ||
+      err.includes('context') ||
+      err.includes('allocation')
+    )) {
+      return true;
+    }
+    if (/\boom\b/.test(err) && (err.includes('vram') || err.includes('gpu') || err.includes('memory'))) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+export function inferFailReasonCode(errorMessage, httpStatus = 0) {
   const message = String(errorMessage || '').trim().toLowerCase();
+  if (isContextOverflowError(message, httpStatus)) return 'context_overflow';
   if (message.startsWith('unsupported_task_type')) return 'unsupported_task_type';
   if (message.includes('invalid_result')) return 'invalid_result';
   if (message.includes('timeout') || message.includes('etimedout')) return 'timeout';
@@ -1601,13 +1664,13 @@ function inferFailReasonCode(errorMessage) {
   return 'unknown';
 }
 
-async function failTask(taskId, errorMessage) {
+async function failTask(taskId, errorMessage, httpStatus = 0) {
   if (Date.now() < failRateLimitUntil) {
     warn(`fail report skipped while rate-limit cooldown is active for task ${taskId}`);
     return { rateLimited: true };
   }
 
-  const reason_code = inferFailReasonCode(errorMessage);
+  const reason_code = inferFailReasonCode(errorMessage, httpStatus);
   const provider = LLM_PROVIDER;
   const model = LLM_PROVIDER === 'openai_compat' ? OPENAI_COMPAT_MODEL : OLLAMA_MODEL;
 
@@ -1694,7 +1757,8 @@ async function processTask(task) {
   if (/no models loaded/i.test(failMessage)) {
     warn('hint: load the required model in LM Studio (Developer page or lms load), then keep Local Server running');
   }
-  const failResult = await failTask(taskId, failMessage);
+  const failStatus = lastError?.status || 0;
+  const failResult = await failTask(taskId, failMessage, failStatus);
   if (failResult?.leaseExpired) {
     return;
   }
@@ -1846,11 +1910,18 @@ async function start() {
   await workerLoop();
 }
 
-start().catch((error) => {
-  if (isFatalHubError(error)) {
-    handleFatalHubError(error);
-  } else {
-    console.error('[ai-worker] fatal:', error.message);
-  }
-  process.exit(1);
-});
+const isDirectRun = Boolean(
+  process.argv[1] &&
+  path.resolve(process.argv[1]).toLowerCase() === fileURLToPath(import.meta.url).toLowerCase()
+);
+
+if (isDirectRun) {
+  start().catch((error) => {
+    if (isFatalHubError(error)) {
+      handleFatalHubError(error);
+    } else {
+      console.error('[ai-worker] fatal:', error.message);
+    }
+    process.exit(1);
+  });
+}

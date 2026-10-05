@@ -107,11 +107,25 @@ export async function probeOllamaModelDetails(ollamaBaseUrl, modelName) {
     });
     if (!res.ok) return null;
     const data = await res.json();
+    let numCtx = null;
+    const params = String(data?.parameters || '');
+    const paramMatch = params.match(/num_ctx\s+(\d+)/i);
+    if (paramMatch) {
+      numCtx = Number(paramMatch[1]);
+    } else if (data?.model_info && typeof data.model_info === 'object') {
+      for (const [key, val] of Object.entries(data.model_info)) {
+        if (key.endsWith('.context_length') || key === 'context_length') {
+          numCtx = Number(val);
+          break;
+        }
+      }
+    }
     return {
       parameter_size: data?.details?.parameter_size || null,
       quantization_level: data?.details?.quantization_level || null,
       family: data?.details?.family || null,
       format: data?.details?.format || null,
+      num_ctx: Number.isFinite(numCtx) && numCtx > 0 ? numCtx : null,
     };
   } catch {
     return null;
@@ -136,7 +150,55 @@ export function buildRuntimeAttestation(policy, detected = {}) {
   if (detectedEmbed) attestation.detected_embedding_model = detectedEmbed;
   if (detected.detected_parameter_size) attestation.detected_parameter_size = String(detected.detected_parameter_size).trim();
   if (detected.model_file_size_bytes) attestation.model_file_size_bytes = Number(detected.model_file_size_bytes);
+  const rawCtx = Number(detected.max_context_tokens || detected.num_ctx || 0);
+  if (Number.isFinite(rawCtx) && rawCtx > 0) {
+    attestation.max_context_tokens = Math.max(512, Math.min(131072, Math.floor(rawCtx)));
+  }
   return attestation;
+}
+
+const cachedLmStudioContextsByUrl = new Map();
+const LM_STUDIO_CONTEXT_CACHE_TTL_MS = 15000;
+
+export function clearLmStudioModelContextsCache() {
+  cachedLmStudioContextsByUrl.clear();
+}
+
+export async function fetchLmStudioModelContexts(baseUrl, apiKey = '', { bypassCache = false } = {}) {
+  const apiBase = String(baseUrl || '').trim().replace(/\/+$/, '').replace(/\/v\d+$/i, '');
+  const now = Date.now();
+  const cached = cachedLmStudioContextsByUrl.get(apiBase);
+  if (!bypassCache && cached && (now - cached.ts < LM_STUDIO_CONTEXT_CACHE_TTL_MS)) {
+    return cached.result;
+  }
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 3500);
+  try {
+    const headers = { Accept: 'application/json' };
+    if (apiKey) headers.Authorization = `Bearer ${apiKey}`;
+    const res = await fetch(`${apiBase}/api/v0/models`, { headers, signal: controller.signal });
+    if (!res.ok) return { supported: false, modelContextLengths: {} };
+    const payload = await res.json().catch(() => null);
+    const models = Array.isArray(payload?.data) ? payload.data : [];
+    const modelContextLengths = {};
+    for (const m of models) {
+      const id = String(m?.id || '').trim();
+      if (!id) continue;
+      // L-2: If loaded_context_length <= 0 or missing, fallback to safe default 8192 tokens.
+      // A context value of 0 is never emitted to attestation.
+      let ctx = Number(m?.loaded_context_length || m?.max_context_length || 0);
+      if (!Number.isFinite(ctx) || ctx <= 0) ctx = 8192;
+      modelContextLengths[id] = Math.max(512, Math.min(131072, Math.floor(ctx)));
+    }
+    const result = { supported: true, modelContextLengths };
+    cachedLmStudioContextsByUrl.set(apiBase, { result, ts: now });
+    return result;
+  } catch {
+    return { supported: false, modelContextLengths: {} };
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 export async function fetchOpenAICompatModelIds(baseUrl, apiKey = '') {
@@ -222,9 +284,15 @@ export async function verifyLocalRuntimeAgainstPolicy({
   }
 
   let available = [];
+  let modelContexts = {};
   try {
     if (policy.provider === 'openai_compat') {
-      available = await fetchOpenAICompatModelIds(baseUrl, apiKey);
+      const [models, ctxResult] = await Promise.all([
+        fetchOpenAICompatModelIds(baseUrl, apiKey),
+        fetchLmStudioModelContexts(baseUrl, apiKey).catch(() => ({ supported: false, modelContextLengths: {} })),
+      ]);
+      available = models;
+      modelContexts = ctxResult?.modelContextLengths || {};
     }
   } catch (error) {
     return {
@@ -272,16 +340,24 @@ export async function verifyLocalRuntimeAgainstPolicy({
     };
   }
 
+  let activeContext = 8192;
+  if (detectedGenerationModel && modelContexts[detectedGenerationModel]) {
+    activeContext = modelContexts[detectedGenerationModel];
+  }
+
   return {
     ok: true,
     blocked: false,
     attestation: buildRuntimeAttestation(policy, {
       detected_generation_model: detectedGenerationModel,
       detected_embedding_model: detectedEmbeddingModel,
+      max_context_tokens: activeContext,
     }),
     availableModels: available,
     detected_generation_model: detectedGenerationModel,
     detected_embedding_model: detectedEmbeddingModel,
+    max_context_tokens: activeContext,
+    modelContextLengths: modelContexts,
   };
 }
 
