@@ -5,6 +5,8 @@ const { createWorkerStartGate } = require('./workerStartGate.cjs');
 const {
   fetchHubRuntimePolicy,
   applyPolicyToConfig,
+  isApprovedGenerationModel,
+  extractHardwareTier,
   exactModelListed,
   resolveListedModelId,
   buildRuntimePolicyIssues,
@@ -17,7 +19,7 @@ const {
 } = require('./hubRequestShared.cjs');
 const path = require('path');
 const fs = require('fs');
-const { spawn } = require('child_process');
+const { spawn, execFileSync } = require('child_process');
 const crypto = require('crypto');
 const { Readable } = require('stream');
 const http = require('http');
@@ -80,27 +82,6 @@ const DEFAULT_LLM_PROVIDER = 'ollama';
 const DEFAULT_OPENAI_COMPAT_URL = 'http://localhost:1234/v1';
 const DEFAULT_OPENAI_COMPAT_ROLE_MODE = 'auto';
 
-const SUPPORTED_GEN_MODEL_CANONICAL = new Set([
-  'phi3:latest',
-  'mistral:latest',
-  'mistral-7b-instruct-v0.3',
-  'qwen2.5-7b-instruct',
-  'qwen2.5-coder-7b-instruct',
-  'qwen/qwen3-vl-8b',
-]);
-
-const SUPPORTED_GEN_MODELS_BY_PROVIDER = {
-  ollama: new Set(['phi3:latest']),
-  openai_compat: new Set([
-    'qwen/qwen3-vl-8b',
-    'mistral-7b-instruct-v0.3',
-    'mistral:latest',
-    'phi3:latest',
-    'qwen2.5-7b-instruct',
-    'qwen2.5-coder-7b-instruct',
-  ]),
-};
-
 const SUPPORTED_GEN_MODEL_ALIASES = new Map([
   ['phi3:latest', new Set([
     'phi3:latest',
@@ -159,9 +140,15 @@ function normalizeModelName(value) {
   return String(value || '').trim().toLowerCase();
 }
 
-function getAllowedGenModelsForProvider(provider) {
-  const normalizedProvider = String(provider || '').trim().toLowerCase();
-  return SUPPORTED_GEN_MODELS_BY_PROVIDER[normalizedProvider] || SUPPORTED_GEN_MODEL_CANONICAL;
+function getAllowedGenModelsForProvider(provider, policy = null) {
+  if (policy && isPolicyEnforced(policy)) {
+    const list = [
+      policy.generation_model,
+      ...(Array.isArray(policy.allowed_generation_models) ? policy.allowed_generation_models : [])
+    ].filter(Boolean);
+    return new Set(list);
+  }
+  return new Set();
 }
 
 function normalizeGenModelForProvider(provider, value) {
@@ -177,35 +164,41 @@ function normalizeGenModelForProvider(provider, value) {
   return normalized;
 }
 
-function isSupportedGenModelForProvider(provider, value) {
-  const allowed = getAllowedGenModelsForProvider(provider);
-  return allowed.has(normalizeGenModelForProvider(provider, value));
+function isSupportedGenModelForProvider(provider, value, policy = null) {
+  if (!value || !String(value).trim()) return false;
+  if (policy && isPolicyEnforced(policy)) {
+    return isApprovedGenerationModel(policy, value);
+  }
+  return true;
 }
 
-function mapSupportedModelFromAvailable(availableModels, preferredValue, provider = 'openai_compat') {
-  const allowed = getAllowedGenModelsForProvider(provider);
+function mapSupportedModelFromAvailable(availableModels, preferredValue, provider = 'openai_compat', policy = null) {
   const normalizedPreferred = normalizeModelName(preferredValue);
   const normalizedAvailable = Array.isArray(availableModels)
     ? availableModels.map((item) => String(item || '').trim()).filter(Boolean)
     : [];
 
+  const isApproved = (candidate) => {
+    if (!candidate || !String(candidate).trim()) return false;
+    if (policy && isPolicyEnforced(policy)) {
+      return isApprovedGenerationModel(policy, candidate);
+    }
+    return true;
+  };
+
   // Prefer exact user-selected model if it is available and supported by policy.
   if (normalizedPreferred) {
     for (const candidate of normalizedAvailable) {
-      if (normalizeModelName(candidate) === normalizedPreferred) {
-        const canonical = normalizeGenModelForProvider(provider, candidate);
-        if (allowed.has(canonical)) {
-          return { availableModel: candidate, canonicalModel: canonical };
-        }
+      if (normalizeModelName(candidate) === normalizedPreferred && isApproved(candidate)) {
+        return { availableModel: candidate, canonicalModel: candidate };
       }
     }
   }
 
-  // Otherwise find the first available model that maps to allowed canonical set.
+  // Otherwise find the first available model that is approved.
   for (const candidate of normalizedAvailable) {
-    const canonical = normalizeGenModelForProvider(provider, candidate);
-    if (allowed.has(canonical)) {
-      return { availableModel: candidate, canonicalModel: canonical };
+    if (isApproved(candidate)) {
+      return { availableModel: candidate, canonicalModel: candidate };
     }
   }
 
@@ -358,12 +351,49 @@ function buildHardwareFingerprint() {
     .slice(0, 32);
 }
 
+function readQtWorkerDeviceIdFromRegistry() {
+  if (process.platform !== 'win32') return '';
+  try {
+    const stdout = execFileSync(
+      'reg.exe',
+      ['query', 'HKCU\\Software\\Quavence\\Quavence-Qt\\AIWorker', '/v', 'deviceId'],
+      {
+        timeout: 2000,
+        windowsHide: true,
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'ignore'],
+      }
+    );
+    const match = stdout.match(/deviceId\s+REG_\w+\s+([^\r\n]+)/i);
+    if (match && match[1]) {
+      const val = match[1].trim();
+      if (/^[0-9a-zA-Z_\-]{6,128}$/.test(val)) {
+        return val;
+      }
+    }
+  } catch {
+    // quiet fallback on missing key or non-zero exit
+  }
+  return '';
+}
+
 function ensureWorkerDeviceId(config = {}) {
+  // On Windows, if Quavence-Qt wallet is installed, always prioritize its deviceId
+  // so that desktop worker and Qt wallet share the exact same ID and never conflict on Hub.
+  const qtDeviceId = readQtWorkerDeviceIdFromRegistry();
+  if (qtDeviceId) {
+    return qtDeviceId;
+  }
+
   const existing = String(config?.deviceId || '').trim();
+  if (/^qt-worker-[0-9a-zA-Z_\-]{4,120}$/i.test(existing)) return existing;
   if (/^hw-[0-9a-f]{32}$/i.test(existing)) return existing;
   if (/^[0-9a-f-]{36}$/i.test(existing)) return existing;
+  if (existing && /^[0-9a-zA-Z_\-]{6,128}$/.test(existing)) return existing;
+
   return `hw-${buildHardwareFingerprint()}`;
 }
+
 
 function getBundledRuntimeDir() {
   if (app.isPackaged) {
@@ -436,7 +466,7 @@ async function loadConfig() {
       hasStoredToken
     };
   } catch {
-    const deviceId = crypto.randomUUID();
+    const deviceId = ensureWorkerDeviceId({});
     return mergeLifecycleDefaults({
       apiUrl: DEFAULT_API_URL,
       runtimeMode: 'managed',
@@ -1195,25 +1225,57 @@ async function checkRuntime(config) {
   const policy = await getCachedRuntimePolicy(config?.apiUrl);
   const effectiveConfig = applyPolicyToConfig(config || {}, policy);
   const policyActive = isPolicyEnforced(policy);
+  const hardwareTier = extractHardwareTier(policy);
   const provider = String(effectiveConfig?.llmProvider || DEFAULT_LLM_PROVIDER).trim().toLowerCase();
-  const allowedModels = getAllowedGenModelsForProvider(provider);
+  const allowedModels = getAllowedGenModelsForProvider(provider, policy);
   if (provider === 'openai_compat') {
     const llmBaseUrl = normalizeOpenAICompatBaseUrl(effectiveConfig?.llmBaseUrl || DEFAULT_OPENAI_COMPAT_URL);
     const llmApiKey = String(effectiveConfig?.llmApiKey || '').trim();
-    const genModel = policyActive
-      ? String(policy.generation_model || '').trim()
-      : normalizeGenModelForProvider(provider, effectiveConfig?.genModel || effectiveConfig?.model || DEFAULT_OPENAI_GEN_MODEL);
+    const userPreferredGen = String(effectiveConfig?.genModel || effectiveConfig?.model || '').trim();
+    let genModel;
+    if (policyActive) {
+      if (userPreferredGen && isApprovedGenerationModel(policy, userPreferredGen)) {
+        genModel = userPreferredGen;
+      } else {
+        genModel = String(policy.generation_model || '').trim();
+      }
+    } else {
+      genModel = normalizeGenModelForProvider(provider, userPreferredGen || DEFAULT_OPENAI_GEN_MODEL);
+    }
     const embedModel = policyActive
       ? String(policy.embedding_model || '').trim()
       : String(effectiveConfig?.embedModel || '').trim();
     const reachable = await checkOpenAICompatReachable(llmBaseUrl, llmApiKey);
     const availableModels = reachable ? await fetchOpenAICompatModels(llmBaseUrl, llmApiKey) : [];
     const selectedSupported = policyActive
-      ? true
-      : isSupportedGenModelForProvider(provider, genModel);
-    const mapped = mapSupportedModelFromAvailable(availableModels, effectiveConfig?.genModel || effectiveConfig?.model || '', provider);
+      ? isApprovedGenerationModel(policy, genModel)
+      : isSupportedGenModelForProvider(provider, genModel, policy);
+    const mapped = mapSupportedModelFromAvailable(availableModels, userPreferredGen, provider, policy);
+
+    // Resolve detected model on endpoint
+    let detectedGenerationModel = null;
+    if (policyActive) {
+      if (genModel) {
+        detectedGenerationModel = resolveListedModelId(genModel, availableModels);
+      }
+      if (!detectedGenerationModel && policy.generation_model) {
+        detectedGenerationModel = resolveListedModelId(policy.generation_model, availableModels);
+      }
+      if (!detectedGenerationModel && Array.isArray(policy.allowed_generation_models)) {
+        for (const candidate of policy.allowed_generation_models) {
+          detectedGenerationModel = resolveListedModelId(candidate, availableModels);
+          if (detectedGenerationModel) {
+            genModel = candidate;
+            break;
+          }
+        }
+      }
+    } else {
+      detectedGenerationModel = resolveListedModelId(genModel, availableModels);
+    }
+
     const generationModelListed = policyActive
-      ? exactModelListed(genModel, availableModels)
+      ? Boolean(detectedGenerationModel)
       : Boolean(selectedSupported && mapped && mapped.canonicalModel === genModel);
     const embeddingModelListed = policyActive
       ? exactModelListed(embedModel, availableModels)
@@ -1229,7 +1291,8 @@ async function checkRuntime(config) {
       const listedId = resolveListedModelId(canonicalId, availableModels) || String(canonicalId || '').trim();
       return isOpenAICompatModelListed(loadState.loaded, listedId);
     };
-    const generationModelAvailable = generationModelListed && isLoaded(genModel);
+    const activeGenTarget = detectedGenerationModel || genModel;
+    const generationModelAvailable = generationModelListed && isLoaded(activeGenTarget);
     const embeddingModelAvailable = embeddingModelListed && (!embedModel || isLoaded(embedModel));
     const generationModelDownloadedNotLoaded = generationModelListed && !generationModelAvailable;
     const embeddingModelDownloadedNotLoaded = Boolean(embedModel) && embeddingModelListed && !embeddingModelAvailable;
@@ -1244,6 +1307,7 @@ async function checkRuntime(config) {
         embeddingOk: embeddingModelAvailable,
         reachable,
         availableIds: availableModels,
+        activeGenModel: activeGenTarget,
       })
       : '';
     const runtimePolicyBlocked = Boolean(runtimePolicyBlockReason);
@@ -1254,18 +1318,16 @@ async function checkRuntime(config) {
         embeddingOk: embeddingModelAvailable,
         reachable,
         availableIds: availableModels,
+        activeGenModel: activeGenTarget,
       })
       : [];
-    const detectedGenerationModel = policyActive
-      ? resolveListedModelId(genModel, availableModels)
-      : null;
     const detectedEmbeddingModel = policyActive
       ? resolveListedModelId(embedModel, availableModels)
       : null;
 
     let maxContextTokens = 8192;
     if (loadState.supported && loadState.modelContextLengths) {
-      const mappedId = resolveListedModelId(genModel, availableModels) || genModel;
+      const mappedId = activeGenTarget;
       if (loadState.modelContextLengths[mappedId]) {
         maxContextTokens = loadState.modelContextLengths[mappedId];
       }
@@ -1278,6 +1340,8 @@ async function checkRuntime(config) {
       model: genModel,
       genModel,
       embedModel,
+      hardware_tier: hardwareTier,
+      hardwareTier,
       ollamaReachable: false,
       modelAvailable,
       generationModelAvailable: modelAvailable,
@@ -1295,6 +1359,7 @@ async function checkRuntime(config) {
       policyEnforced: policyActive,
       requiredGenerationModel: policyActive ? policy.generation_model : null,
       requiredEmbeddingModel: policyActive ? policy.embedding_model : null,
+      allowedGenerationModels: policyActive ? Array.from(allowedModels) : [],
       detectedModels: availableModels,
       modelLoadStateKnown: loadState.supported,
       loadedModels: loadState.loaded,
@@ -1312,7 +1377,7 @@ async function checkRuntime(config) {
             ? 'Embedding model is listed on OpenAI-compatible /models (load it in LM Studio if missing)'
             : 'Embedding model optional; set to match RAG GI_RAG_EMBED_MODEL when using local embeddings'),
         policyAllowed: policyActive
-          ? `Hub policy requires ${policy.generation_model} + ${policy.embedding_model}`
+          ? `Hub policy (Tier ${hardwareTier}) requires ${policy.generation_model} (or approved tier models) + ${policy.embedding_model}`
           : `Allowed models: ${Array.from(allowedModels).join(', ')}`
       }
     };
@@ -1581,6 +1646,7 @@ async function spawnWorkerProcess(config) {
   const policy = await getCachedRuntimePolicy(config?.apiUrl);
   const effectiveConfig = applyPolicyToConfig(config || {}, policy);
   const policyActive = isPolicyEnforced(policy);
+  const hardwareTier = extractHardwareTier(policy);
 
   const runtimeToken =
     String(config?.token || '').trim() ||
@@ -1597,17 +1663,25 @@ async function spawnWorkerProcess(config) {
     throw new Error('Invalid Quavence payout address format (must start with S, 26-35 chars)');
   }
   const llmProvider = String(effectiveConfig?.llmProvider || DEFAULT_LLM_PROVIDER).trim().toLowerCase();
-  const genModel = policyActive
-    ? String(policy.generation_model || '').trim()
-    : normalizeGenModelForProvider(
+  const userGenModel = String(effectiveConfig?.genModel || effectiveConfig?.model || '').trim();
+  let genModel;
+  if (policyActive) {
+    if (userGenModel && isApprovedGenerationModel(policy, userGenModel)) {
+      genModel = userGenModel;
+    } else {
+      genModel = String(policy.generation_model || '').trim();
+    }
+  } else {
+    genModel = normalizeGenModelForProvider(
       llmProvider,
-      effectiveConfig?.genModel || effectiveConfig?.model || (llmProvider === 'openai_compat' ? DEFAULT_OPENAI_GEN_MODEL : DEFAULT_GEN_MODEL)
+      userGenModel || (llmProvider === 'openai_compat' ? DEFAULT_OPENAI_GEN_MODEL : DEFAULT_GEN_MODEL)
     );
+  }
   if (!genModel) {
     throw new Error('Generation model is required (example: phi3:latest)');
   }
-  if (!policyActive && !isSupportedGenModelForProvider(llmProvider, genModel)) {
-    throw new Error(`Unsupported generation model. Allowed: ${Array.from(getAllowedGenModelsForProvider(llmProvider)).join(', ')}`);
+  if (policyActive && !isApprovedGenerationModel(policy, genModel)) {
+    throw new Error(`Unsupported generation model. Allowed: ${Array.from(getAllowedGenModelsForProvider(llmProvider, policy)).join(', ')}`);
   }
   const embedModel = policyActive
     ? String(policy.embedding_model || '').trim()
@@ -1620,6 +1694,7 @@ async function spawnWorkerProcess(config) {
 
   // Requests must carry the id the endpoint itself exposes; policy/canonical ids are for attestation.
   let endpointGenModel = genModel;
+  let workerMaxContext = 8192;
 
   if (llmProvider === 'openai_compat') {
     const llmBaseUrl = normalizeOpenAICompatBaseUrl(effectiveConfig?.llmBaseUrl || DEFAULT_OPENAI_COMPAT_URL);
@@ -1629,15 +1704,26 @@ async function spawnWorkerProcess(config) {
       throw new Error('OpenAI-compatible endpoint is not reachable. Run "Prepare Runtime" first.');
     }
     const availableModels = await fetchOpenAICompatModels(llmBaseUrl, llmApiKey);
+    let targetGenId = resolveListedModelId(genModel, availableModels);
+    if (!targetGenId && policyActive && Array.isArray(policy.allowed_generation_models)) {
+      for (const candidate of policy.allowed_generation_models) {
+        targetGenId = resolveListedModelId(candidate, availableModels);
+        if (targetGenId) {
+          genModel = candidate;
+          break;
+        }
+      }
+    }
+
     if (policyActive) {
-      if (!exactModelListed(genModel, availableModels)) {
-        throw new Error(`Required generation model "${genModel}" is not loaded in LM Studio.`);
+      if (!targetGenId) {
+        throw new Error(`Required generation model "${genModel}" (or approved tier models) is not loaded in LM Studio.`);
       }
       if (embedModel && !exactModelListed(embedModel, availableModels)) {
         throw new Error(`Required embedding model "${embedModel}" is not loaded in LM Studio.`);
       }
     } else {
-      const selected = mapSupportedModelFromAvailable(availableModels, effectiveConfig?.genModel || effectiveConfig?.model || '', llmProvider);
+      const selected = mapSupportedModelFromAvailable(availableModels, effectiveConfig?.genModel || effectiveConfig?.model || '', llmProvider, policy);
       if (!selected || selected.canonicalModel !== genModel) {
         throw new Error(`Generation model "${genModel}" is not available on endpoint. Check LM Studio loaded model.`);
       }
@@ -1645,17 +1731,19 @@ async function spawnWorkerProcess(config) {
         throw new Error(`Embedding model "${embedModel}" is not listed on endpoint. Load it in LM Studio or clear the field.`);
       }
     }
-    let workerMaxContext = 8192;
+
+    endpointGenModel = targetGenId || genModel;
+    if (endpointGenModel !== genModel) {
+      sendLog('info', `LM Studio exposes generation model as "${endpointGenModel}" (policy id "${genModel}")`);
+    }
+
     const loadState = await fetchLmStudioLoadedModels(llmBaseUrl, llmApiKey);
     if (loadState.supported && loadState.modelContextLengths) {
       if (loadState.modelContextLengths[endpointGenModel]) {
         workerMaxContext = loadState.modelContextLengths[endpointGenModel];
+      } else if (loadState.modelContextLengths[genModel]) {
+        workerMaxContext = loadState.modelContextLengths[genModel];
       }
-    }
-
-    endpointGenModel = resolveListedModelId(genModel, availableModels) || genModel;
-    if (endpointGenModel !== genModel) {
-      sendLog('info', `LM Studio exposes generation model as "${endpointGenModel}" (policy id "${genModel}")`);
     }
   } else {
     if (!config.ollamaUrl || !String(config.ollamaUrl).trim()) {
@@ -1679,6 +1767,7 @@ async function spawnWorkerProcess(config) {
   }
 
   sessionNodeToken = runtimeToken;
+  sendLog('info', `Starting worker [Hardware Tier: ${hardwareTier}] with model "${genModel}"`);
 
   const childEnv = {
     ...process.env,
@@ -1701,6 +1790,8 @@ async function spawnWorkerProcess(config) {
     AI_WORKER_LLM_PROVIDER: llmProvider,
     AI_WORKER_LLM_BASE_URL: normalizeOpenAICompatBaseUrl(config?.llmBaseUrl || DEFAULT_OPENAI_COMPAT_URL),
     AI_WORKER_LLM_MODEL: endpointGenModel,
+    AI_WORKER_HARDWARE_TIER: String(hardwareTier),
+    AI_WORKER_PREFERRED_GEN_MODEL: genModel,
     AI_WORKER_LLM_MAX_CONTEXT_TOKENS: String(workerMaxContext || 8192),
     AI_WORKER_LLM_API_KEY: String(config?.llmApiKey || '').trim(),
     AI_WORKER_OPENAI_COMPAT_ROLE_MODE: normalizeOpenAICompatRoleMode(config?.openAiCompatRoleMode),
@@ -1927,18 +2018,32 @@ function registerIpcHandlers() {
       if (!ollamaUrl) return { ok: true, data: { generation: [], raw: [] } };
       models = await fetchAvailableModels(ollamaUrl);
     }
+    const hardwareTier = extractHardwareTier(policy);
     if (isPolicyEnforced(policy)) {
+      const allowedList = [
+        policy.generation_model,
+        ...(Array.isArray(policy.allowed_generation_models) ? policy.allowed_generation_models : [])
+      ].filter((m) => Boolean(m && String(m).trim()));
+      const uniqueAllowed = Array.from(new Set(allowedList));
       return {
         ok: true,
         data: {
-          generation: [policy.generation_model].filter(Boolean),
+          generation: uniqueAllowed,
           raw: models || [],
           policyEnforced: true,
+          hardware_tier: hardwareTier,
         },
       };
     }
-    const allowedModels = (models || []).filter((name) => isSupportedGenModelForProvider(provider, name));
-    return { ok: true, data: { generation: allowedModels, raw: models || [] } };
+    const allowedModels = (models || []).filter((name) => isSupportedGenModelForProvider(provider, name, policy));
+    return {
+      ok: true,
+      data: {
+        generation: allowedModels,
+        raw: models || [],
+        hardware_tier: hardwareTier,
+      },
+    };
   });
   ipcMain.handle('runtime:prepare', async (_event, payload) => {
     const result = await prepareRuntime(payload?.config || {});

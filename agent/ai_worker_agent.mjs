@@ -8,9 +8,11 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   buildRuntimeAttestation,
+  extractHardwareTier,
   fetchHubRuntimePolicy,
   fetchOpenAICompatModelIds,
   formatRuntimeMismatchLabels,
+  isApprovedGenerationModel,
   resolveListedModelId,
   verifyLocalRuntimeAgainstPolicy,
 } from './runtime_policy.mjs';
@@ -51,6 +53,9 @@ const RUNTIME_POLICY_REFRESH_MS = Number(process.env.AI_WORKER_RUNTIME_POLICY_RE
 const OLLAMA_TIMEOUT_MS = Number(process.env.AI_WORKER_OLLAMA_TIMEOUT_MS || 120000);
 const OLLAMA_MAX_RETRIES = Number(process.env.AI_WORKER_OLLAMA_MAX_RETRIES || 3);
 const TASK_EXECUTION_MAX_RETRIES = Number(process.env.AI_WORKER_TASK_EXECUTION_MAX_RETRIES || 2);
+export const WATCHDOG_INFERENCE_TIMEOUT_MS = Number(process.env.AI_WORKER_WATCHDOG_INFERENCE_MS || 120000);
+export const WATCHDOG_EMBEDDING_TIMEOUT_MS = Number(process.env.AI_WORKER_WATCHDOG_EMBEDDING_MS || 60000);
+const PREFERRED_GEN_MODEL = String(process.env.AI_WORKER_PREFERRED_GEN_MODEL || '').trim();
 
 let heartbeatTimer = null;
 let stopRequested = false;
@@ -64,7 +69,7 @@ let runtimePolicyFetchedAt = 0;
 let runtimeAttestation = null;
 let runtimePolicyBlocked = false;
 let runtimePolicyBlockReason = '';
-let activeGenerationModel = OPENAI_COMPAT_MODEL;
+let activeGenerationModel = PREFERRED_GEN_MODEL || OPENAI_COMPAT_MODEL;
 let hubRuntimeAttestationRejected = false;
 let hubRuntimeAttestationRejectedVersion = '';
 
@@ -336,13 +341,13 @@ function handleWorkerDeviceBindingFailure(res, action) {
   const message = 'Worker token is bound to another device. Reset binding on Workers page or rotate token.';
   warn(`${action} blocked (${code}): ${message}`);
   emitWorkerStopReason({
-    code: 'hub_suspended',
+    code: 'device_conflict',
     http: Number(res?.status || 409),
     message: `${code}: ${message}`,
   });
   const error = buildHubError(action, res);
   error.message = `${action} failed (${res.status}): ${message}`;
-  error.hubCode = 'hub_suspended';
+  error.hubCode = 'device_conflict';
   throw error;
 }
 
@@ -375,8 +380,11 @@ const sharedHttpAgent = new http.Agent({
   timeout: 60000,
 });
 
-function requestJson(method, urlString, headers = {}, body = null, timeoutMs = 15000) {
+function requestJson(method, urlString, headers = {}, body = null, timeoutMs = 15000, signal = null) {
   return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      return reject(new Error('AbortError: Request aborted by watchdog'));
+    }
     const url = new URL(urlString);
     const transport = url.protocol === 'https:' ? https : http;
     const payload = body ? JSON.stringify(body) : null;
@@ -391,6 +399,7 @@ function requestJson(method, urlString, headers = {}, body = null, timeoutMs = 1
         family: 4,
         servername: url.hostname,
         agent: url.protocol === 'https:' ? sharedHttpsAgent : sharedHttpAgent,
+        signal: signal || undefined,
         headers: {
           ...headers,
           ...(payload ? { 'Content-Length': Buffer.byteLength(payload) } : {})
@@ -423,6 +432,12 @@ function requestJson(method, urlString, headers = {}, body = null, timeoutMs = 1
       req.destroy(new Error('Connect Timeout Error'));
     });
     req.on('error', (error) => reject(error));
+
+    if (signal) {
+      signal.addEventListener('abort', () => {
+        req.destroy(new Error('AbortError: Request aborted by watchdog'));
+      }, { once: true });
+    }
 
     if (payload) {
       req.write(payload);
@@ -494,7 +509,8 @@ async function callOllamaOnce(prompt, options = {}) {
         num_predict: options.max_tokens || 2048,
       }
     },
-    OLLAMA_TIMEOUT_MS
+    OLLAMA_TIMEOUT_MS,
+    options.signal
   ).catch((error) => {
     throw new Error(networkErrorMessage(error));
   });
@@ -658,7 +674,8 @@ async function callOpenAICompatOnce(prompt, options = {}) {
     `${baseUrl}/chat/completions`,
     headers,
     payload,
-    OLLAMA_TIMEOUT_MS
+    OLLAMA_TIMEOUT_MS,
+    options.signal
   ).catch((error) => {
     throw new Error(networkErrorMessage(error));
   });
@@ -777,7 +794,8 @@ async function callOpenAICompatEmbeddingOnce(input, options = {}) {
     `${baseUrl}/embeddings`,
     headers,
     payload,
-    OLLAMA_TIMEOUT_MS
+    OLLAMA_TIMEOUT_MS,
+    options.signal
   ).catch((error) => {
     throw new Error(networkErrorMessage(error));
   });
@@ -814,8 +832,11 @@ async function callLlm(prompt, options = {}) {
   return callOllama(prompt, options);
 }
 
-function requestStream(method, urlString, headers = {}, body = null, timeoutMs = 120000, onLineChunk) {
+function requestStream(method, urlString, headers = {}, body = null, timeoutMs = 120000, onLineChunk, signal = null) {
   return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      return reject(new Error('AbortError: Stream request aborted by watchdog'));
+    }
     const url = new URL(urlString);
     const transport = url.protocol === 'https:' ? https : http;
     const payload = body ? JSON.stringify(body) : null;
@@ -829,6 +850,7 @@ function requestStream(method, urlString, headers = {}, body = null, timeoutMs =
         method,
         family: 4,
         servername: url.hostname,
+        signal: signal || undefined,
         headers: {
           ...headers,
           ...(payload ? { 'Content-Length': Buffer.byteLength(payload) } : {})
@@ -874,6 +896,12 @@ function requestStream(method, urlString, headers = {}, body = null, timeoutMs =
       req.destroy(new Error('Streaming Connect Timeout Error'));
     });
     req.on('error', (error) => reject(error));
+
+    if (signal) {
+      signal.addEventListener('abort', () => {
+        req.destroy(new Error('AbortError: Stream request aborted by watchdog'));
+      }, { once: true });
+    }
 
     if (payload) {
       req.write(payload);
@@ -944,7 +972,8 @@ async function callOllamaStream(prompt, options = {}, onDelta) {
           onDelta(parsed.response);
         }
       } catch {}
-    }
+    },
+    options.signal
   );
 
   if (!res.ok) {
@@ -1012,7 +1041,8 @@ async function callOpenAICompatStream(prompt, options = {}, onDelta) {
           }
         } catch {}
       }
-    }
+    },
+    options.signal
   );
 
   if (!res.ok) {
@@ -1088,7 +1118,7 @@ function parseJsonCandidate(text, fallback = null) {
   }
 }
 
-async function executeEmbeddingTask(task) {
+async function executeEmbeddingTask(task, options = {}) {
   const taskId = task?.id;
   const input = task?.input !== undefined
     ? task.input
@@ -1108,6 +1138,7 @@ async function executeEmbeddingTask(task) {
     model,
     dimensions,
     encoding_format,
+    signal: options.signal,
   });
 
   return result;
@@ -1117,12 +1148,12 @@ async function executeEmbeddingTask(task) {
  * Universal Dumb Runner: executes pre-assembled prompt received from Hub.
  * The worker is a pure inference relay with zero client-side prompt stitching or schema dicts.
  */
-async function executeTask(task) {
+async function executeTask(task, options = {}) {
   const taskId = task?.id;
   const taskType = String(task?.task_type || '').trim().toUpperCase();
 
   if (taskType === 'TASK_EMBEDDING') {
-    return await executeEmbeddingTask(task);
+    return await executeEmbeddingTask(task, options);
   }
 
   const userPrompt = String(
@@ -1218,9 +1249,9 @@ async function executeTask(task) {
       };
 
       if (LLM_PROVIDER === 'openai_compat') {
-        modelResult = await callOpenAICompatStream(userPrompt, { systemPrompt, tools, tool_choice: toolChoice, messages }, onDelta);
+        modelResult = await callOpenAICompatStream(userPrompt, { systemPrompt, tools, tool_choice: toolChoice, messages, signal: options.signal }, onDelta);
       } else {
-        modelResult = await callOllamaStream(userPrompt, { systemPrompt }, onDelta);
+        modelResult = await callOllamaStream(userPrompt, { systemPrompt, signal: options.signal }, onDelta);
       }
       streamClosed = true;
       await flushQueue();
@@ -1234,6 +1265,7 @@ async function executeTask(task) {
       toolChoice,
       messages,
       task_type: task?.task_type,
+      signal: options.signal,
     });
   }
 
@@ -1376,11 +1408,13 @@ async function refreshRuntimePolicyState() {
     return true;
   }
 
+  const preferredModel = String(PREFERRED_GEN_MODEL || activeGenerationModel || '').trim();
   const verification = await verifyLocalRuntimeAgainstPolicy({
     policy: runtimePolicy,
     llmProvider: LLM_PROVIDER,
     baseUrl: normalizeOpenAICompatBaseUrl(OPENAI_COMPAT_BASE_URL),
     apiKey: OPENAI_COMPAT_API_KEY,
+    preferredModel,
   });
 
   runtimeAttestation = verification.blocked
@@ -1389,6 +1423,9 @@ async function refreshRuntimePolicyState() {
 
   if (!verification.blocked) {
     setActiveGenerationModel(verification.detected_generation_model, 'detected on endpoint');
+    if (verification.hardware_tier) {
+      log(`Runtime policy verified [Tier ${verification.hardware_tier}] (active model: ${verification.detected_generation_model || activeGenerationModel})`);
+    }
   }
 
   const policyVersion = String(runtimePolicy.runtime_policy_version || '').trim();
@@ -1526,11 +1563,13 @@ async function completeTask(taskId, taskType, claimNonce, resultJson) {
 
   if (!hasRuntimeAttestation() && runtimePolicy) {
     try {
+      const preferredModel = String(PREFERRED_GEN_MODEL || activeGenerationModel || '').trim();
       const verification = await verifyLocalRuntimeAgainstPolicy({
         policy: runtimePolicy,
         llmProvider: LLM_PROVIDER,
         baseUrl: normalizeOpenAICompatBaseUrl(OPENAI_COMPAT_BASE_URL),
         apiKey: OPENAI_COMPAT_API_KEY,
+        preferredModel,
       });
       if (!verification.blocked && (verification.attestation || buildRuntimeAttestation(runtimePolicy))) {
         runtimeAttestation = verification.attestation || buildRuntimeAttestation(runtimePolicy);
@@ -1664,15 +1703,15 @@ export function inferFailReasonCode(errorMessage, httpStatus = 0) {
   return 'unknown';
 }
 
-async function failTask(taskId, errorMessage, httpStatus = 0) {
+async function failTask(taskId, errorMessage, httpStatus = 0, explicitReasonCode = null) {
   if (Date.now() < failRateLimitUntil) {
     warn(`fail report skipped while rate-limit cooldown is active for task ${taskId}`);
     return { rateLimited: true };
   }
 
-  const reason_code = inferFailReasonCode(errorMessage, httpStatus);
+  const reason_code = explicitReasonCode || inferFailReasonCode(errorMessage, httpStatus);
   const provider = LLM_PROVIDER;
-  const model = LLM_PROVIDER === 'openai_compat' ? OPENAI_COMPAT_MODEL : OLLAMA_MODEL;
+  const model = LLM_PROVIDER === 'openai_compat' ? (activeGenerationModel || OPENAI_COMPAT_MODEL) : OLLAMA_MODEL;
 
   const res = await apiCall('POST', `/api/ai/nodes/tasks/${encodeURIComponent(taskId)}/fail`, {
     error_message: String(errorMessage || 'Worker execution failed'),
@@ -1708,6 +1747,9 @@ async function processTask(task) {
   const controlSuffix = task.is_control_task ? ' [control]' : '';
   log(`task claimed: ${taskId} (${task.task_type || 'generic'})${controlSuffix}`);
 
+  const isEmbedding = String(task?.task_type || '').trim().toUpperCase() === 'TASK_EMBEDDING';
+  const watchdogTimeoutMs = isEmbedding ? WATCHDOG_EMBEDDING_TIMEOUT_MS : WATCHDOG_INFERENCE_TIMEOUT_MS;
+
   let lastError = null;
 
   for (let attempt = 1; attempt <= TASK_EXECUTION_MAX_RETRIES; attempt += 1) {
@@ -1725,7 +1767,29 @@ async function processTask(task) {
         }
       }
 
-      const resultJson = await executeTask(task);
+      const watchdogController = new AbortController();
+      let watchdogTimedOut = false;
+      const watchdogTimer = setTimeout(() => {
+        watchdogTimedOut = true;
+        warn('[watchdog] Task timed out, aborted local socket');
+        watchdogController.abort();
+      }, watchdogTimeoutMs);
+
+      let resultJson;
+      try {
+        resultJson = await executeTask(task, { signal: watchdogController.signal });
+      } catch (execError) {
+        if (watchdogTimedOut || watchdogController.signal.aborted) {
+          const timeoutMsg = 'Task timed out, aborted local socket';
+          warn(`task failed: ${taskId} -> ${timeoutMsg}`);
+          await failTask(taskId, timeoutMsg, 408, 'timeout');
+          return;
+        }
+        throw execError;
+      } finally {
+        clearTimeout(watchdogTimer);
+      }
+
       const claimNonce = String(task?.claim_nonce || '').trim();
       const completion = await completeTask(taskId, String(task?.task_type || ''), claimNonce, resultJson);
       if (completion?.leaseExpired) {

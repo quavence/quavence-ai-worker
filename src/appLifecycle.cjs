@@ -409,6 +409,10 @@ function createAppLifecycleManager({
       workerExitReason = 'invalid_token';
       return;
     }
+    if (classified === 'device_conflict') {
+      workerExitReason = 'device_conflict';
+      return;
+    }
     if (classified === 'hub_suspended') {
       workerExitReason = 'hub_suspended';
       return;
@@ -427,6 +431,10 @@ function createAppLifecycleManager({
     }
 
     const text = raw.toLowerCase();
+    if (/worker_device_conflict|worker_device_binding_active|worker_device_id_required|worker_stop_reason code=device_conflict|bound to another device/.test(text)) {
+      workerExitReason = 'device_conflict';
+      return;
+    }
     if (/worker access suspended|hub policy suspended|not active|auto_suspend|worker_stop_reason code=hub_suspended/.test(text)) {
       workerExitReason = 'hub_suspended';
       return;
@@ -445,7 +453,13 @@ function createAppLifecycleManager({
   }
 
   function classifyWorkerExitReason(exitCode) {
-    if (workerExitReason === 'invalid_token' || workerExitReason === 'runtime' || workerExitReason === 'hub_suspended') {
+    if (
+      workerExitReason === 'invalid_token'
+      || workerExitReason === 'runtime'
+      || workerExitReason === 'hub_suspended'
+      || workerExitReason === 'device_conflict'
+      || workerExitReason === 'terms_required'
+    ) {
       return workerExitReason;
     }
     if (exitCode && exitCode !== 0) {
@@ -459,6 +473,13 @@ function createAppLifecycleManager({
     if (reason === 'invalid_token') {
       sendLog('error', 'Worker stopped: invalid token. Replace token before restarting.');
       safeSendToRenderer('app:lifecycle', { type: 'worker_fatal', reason: 'invalid_token' });
+      showMainWindow();
+      updateTrayMenu();
+      return;
+    }
+    if (reason === 'device_conflict') {
+      sendLog('warn', 'Worker stopped: token is bound to another device or client. Reset binding on Workers page.');
+      safeSendToRenderer('app:lifecycle', { type: 'worker_fatal', reason: 'device_conflict' });
       showMainWindow();
       updateTrayMenu();
       return;
@@ -572,6 +593,19 @@ function createAppLifecycleManager({
     }
 
     const overview = await fetchWorkerOverview({ ...config, useStoredToken: true, token: '' });
+    const classifiedOverview = classifyWorkerApiError({
+      status: overview?.status,
+      error: overview?.error,
+      reason: overview?.reason,
+      code: overview?.code,
+      message: overview?.message,
+    });
+    if (classifiedOverview === 'device_conflict') {
+      workerExitReason = 'device_conflict';
+      sendLog('warn', 'Auto-start skipped: token bound to another device or client');
+      showMainWindow();
+      return;
+    }
     const suspended = String(overview?.data?.node?.status || '').toLowerCase() === 'suspended';
     if (suspended || /not active|auto_suspend/i.test(String(overview?.error || overview?.reason || ''))) {
       workerExitReason = 'hub_suspended';

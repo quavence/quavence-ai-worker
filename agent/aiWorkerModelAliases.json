@@ -9,6 +9,7 @@
     "qwen3-8b",
     "qwen3:8b",
     "qwen/qwen3-vl-8b-instruct",
+    "qwen3-vl-8b-instruct",
     "qwen/qwen3-vl-8b-gguf",
     "qwen3-vl-8b-gguf",
     "qwen/qwen3-vl-8b-instruct-gguf",

@@ -132,20 +132,39 @@ export async function probeOllamaModelDetails(ollamaBaseUrl, modelName) {
   }
 }
 
+export function isApprovedGenerationModel(policy, modelId) {
+  if (!modelId || !String(modelId).trim()) return false;
+  if (!policy) return false;
+  const m = String(modelId).trim();
+  const req = String(policy.generation_model || '').trim();
+  if (req && modelsMatchByPolicy(req, m)) return true;
+  const allowed = Array.isArray(policy.allowed_generation_models) ? policy.allowed_generation_models : [];
+  for (const candidate of allowed) {
+    const candStr = String(candidate || '').trim();
+    if (candStr && modelsMatchByPolicy(candStr, m)) return true;
+  }
+  return false;
+}
+
+export function extractHardwareTier(policy) {
+  const val = Number(policy?.hardware_tier || policy?.tier || 1);
+  return Number.isFinite(val) && val > 0 ? val : 1;
+}
+
 export function buildRuntimeAttestation(policy, detected = {}) {
   if (!policy) return null;
-  const attestation = {
-    provider: policy.provider,
-    generation_model: policy.generation_model,
-    embedding_model: policy.embedding_model,
-    runtime_policy_version: policy.runtime_policy_version,
-  };
   const detectedGen = String(
     detected.detected_generation_model || detected.generation_model || ''
   ).trim();
   const detectedEmbed = String(
     detected.detected_embedding_model || detected.embedding_model || ''
   ).trim();
+  const attestation = {
+    provider: policy.provider,
+    generation_model: detectedGen || policy.generation_model,
+    embedding_model: detectedEmbed || policy.embedding_model,
+    runtime_policy_version: policy.runtime_policy_version,
+  };
   if (detectedGen) attestation.detected_generation_model = detectedGen;
   if (detectedEmbed) attestation.detected_embedding_model = detectedEmbed;
   if (detected.detected_parameter_size) attestation.detected_parameter_size = String(detected.detected_parameter_size).trim();
@@ -153,6 +172,10 @@ export function buildRuntimeAttestation(policy, detected = {}) {
   const rawCtx = Number(detected.max_context_tokens || detected.num_ctx || 0);
   if (Number.isFinite(rawCtx) && rawCtx > 0) {
     attestation.max_context_tokens = Math.max(512, Math.min(131072, Math.floor(rawCtx)));
+  }
+  const tier = extractHardwareTier(policy);
+  if (tier > 1) {
+    attestation.hardware_tier = tier;
   }
   return attestation;
 }
@@ -263,10 +286,13 @@ export async function verifyLocalRuntimeAgainstPolicy({
   llmProvider,
   baseUrl,
   apiKey,
+  preferredModel,
 }) {
   if (!policy?.enabled || policy.mode === 'off') {
     return { ok: true, blocked: false, attestation: buildRuntimeAttestation(policy) };
   }
+
+  const hardwareTier = extractHardwareTier(policy);
 
   if (String(llmProvider || '').trim().toLowerCase() !== String(policy.provider || '').trim().toLowerCase()) {
     return {
@@ -275,6 +301,7 @@ export async function verifyLocalRuntimeAgainstPolicy({
       reason: `Runtime blocked: provider must be ${policy.provider}`,
       missingGeneration: true,
       missingEmbedding: true,
+      hardware_tier: hardwareTier,
       runtimePolicyMismatches: [{
         kind: 'provider',
         message: `Provider must be ${policy.provider}`,
@@ -301,6 +328,7 @@ export async function verifyLocalRuntimeAgainstPolicy({
       reason: `Runtime blocked: could not list models (${error?.message || String(error)})`,
       missingGeneration: true,
       missingEmbedding: true,
+      hardware_tier: hardwareTier,
       runtimePolicyMismatches: [{
         kind: 'offline',
         message: `Could not list models (${error?.message || String(error)})`,
@@ -308,17 +336,45 @@ export async function verifyLocalRuntimeAgainstPolicy({
     };
   }
 
-  const detectedGenerationModel = resolveListedModelId(policy.generation_model, available);
+  // Pure Dumb Runner & Tier Parity:
+  // 1. If preferredModel is provided and approved by policy, check if available
+  let detectedGenerationModel = null;
+  const preferred = String(preferredModel || '').trim();
+  if (preferred && isApprovedGenerationModel(policy, preferred)) {
+    detectedGenerationModel = resolveListedModelId(preferred, available);
+  }
+
+  // 2. If not detected via preferred, check baseline generation_model
+  if (!detectedGenerationModel && policy.generation_model) {
+    detectedGenerationModel = resolveListedModelId(policy.generation_model, available);
+  }
+
+  // 3. If still not detected, check any allowed model from policy.allowed_generation_models
+  if (!detectedGenerationModel && Array.isArray(policy.allowed_generation_models)) {
+    for (const candidate of policy.allowed_generation_models) {
+      const candStr = String(candidate || '').trim();
+      if (!candStr) continue;
+      const resolved = resolveListedModelId(candStr, available);
+      if (resolved) {
+        detectedGenerationModel = resolved;
+        break;
+      }
+    }
+  }
+
   const detectedEmbeddingModel = resolveListedModelId(policy.embedding_model, available);
   const generationOk = Boolean(detectedGenerationModel);
   const embeddingOk = Boolean(detectedEmbeddingModel);
   if (!generationOk || !embeddingOk) {
     const mismatches = [];
     if (!generationOk) {
+      const targetModel = preferred && isApprovedGenerationModel(policy, preferred)
+        ? preferred
+        : policy.generation_model;
       mismatches.push({
         kind: 'generation',
-        message: `Load generation model ${policy.generation_model} in LM Studio`,
-        required: policy.generation_model,
+        message: `Load generation model ${targetModel} in LM Studio`,
+        required: targetModel,
       });
     }
     if (!embeddingOk) {
@@ -335,6 +391,7 @@ export async function verifyLocalRuntimeAgainstPolicy({
       reason: `Runtime blocked: ${parts.join('; ')}`,
       missingGeneration: !generationOk,
       missingEmbedding: !embeddingOk,
+      hardware_tier: hardwareTier,
       availableModels: available,
       runtimePolicyMismatches: mismatches,
     };
@@ -348,6 +405,7 @@ export async function verifyLocalRuntimeAgainstPolicy({
   return {
     ok: true,
     blocked: false,
+    hardware_tier: hardwareTier,
     attestation: buildRuntimeAttestation(policy, {
       detected_generation_model: detectedGenerationModel,
       detected_embedding_model: detectedEmbeddingModel,

@@ -63,29 +63,33 @@ const DEFAULT_CONFIG = {
 const OVERVIEW_REFRESH_MS = 45000;
 const RUNTIME_REVALIDATE_MS = 12000;
 const DEFAULT_REWARD_ASSET = 'QVNC';
-const ALLOWED_GEN_MODELS_BY_PROVIDER = {
-  ollama: [
-    'qwen/qwen3-vl-8b',
-    'qwen3-vl:8b',
-    'qwen3:8b',
-    'qwen2.5-7b-instruct',
-    'qwen2.5-coder-7b-instruct',
-    'mistral:latest',
-    'phi3:latest'
-  ],
-  openai_compat: ['qwen/qwen3-vl-8b', 'mistral-7b-instruct-v0.3', 'mistral:latest', 'phi3:latest', 'qwen2.5-7b-instruct', 'qwen2.5-coder-7b-instruct']
-};
-
-function getAllowedModelsForProvider(provider) {
-  return ALLOWED_GEN_MODELS_BY_PROVIDER[String(provider || 'ollama').trim().toLowerCase()] || ALLOWED_GEN_MODELS_BY_PROVIDER.ollama;
+function getAllowedModelsForProvider(provider, policy = null) {
+  if (policy && isRuntimePolicyEnforced(policy)) {
+    const list = [
+      policy.generation_model,
+      ...(Array.isArray(policy.allowed_generation_models) ? policy.allowed_generation_models : [])
+    ].filter((m) => Boolean(m && String(m).trim()));
+    return Array.from(new Set(list));
+  }
+  return [];
 }
 
 function mergeConfigWithRuntimePolicy(baseConfig, policy) {
   const next = { ...(baseConfig || {}) };
   if (!policy?.enabled || policy.mode === 'off') return next;
   next.llmProvider = policy.provider;
-  next.genModel = policy.generation_model;
-  next.model = policy.generation_model;
+  const currentModel = String(next.genModel || next.model || '').trim();
+  const allowed = [
+    policy.generation_model,
+    ...(Array.isArray(policy.allowed_generation_models) ? policy.allowed_generation_models : [])
+  ].filter((m) => Boolean(m && String(m).trim()));
+  if (currentModel && allowed.some((m) => m.toLowerCase() === currentModel.toLowerCase())) {
+    next.genModel = currentModel;
+    next.model = currentModel;
+  } else {
+    next.genModel = policy.generation_model;
+    next.model = policy.generation_model;
+  }
   next.embedModel = policy.embedding_model;
   if (policy.provider === 'openai_compat') {
     const current = String(next.llmBaseUrl || '').trim();
@@ -922,6 +926,11 @@ export default function App() {
         void api.showWindow?.();
         return;
       }
+      if (payload?.reason === 'device_conflict') {
+        setHubState('hub_suspended_device_conflict');
+        void api.showWindow?.();
+        return;
+      }
       if (payload?.reason === 'terms_required') {
         setHubState('terms_required');
         void api.showWindow?.();
@@ -988,6 +997,17 @@ export default function App() {
         actionLabel: 'Open Runtime',
         actionKey: 'runtime',
         dedupeKey: 'runtime_blocked',
+      });
+      return;
+    }
+
+    if (hubState === 'hub_suspended_device_conflict') {
+      pushToast({
+        tone: 'bad',
+        text: 'Worker token is bound to another device or client.',
+        actionLabel: 'Reset on Workers page',
+        actionKey: 'worker-page',
+        dedupeKey: 'device_conflict',
       });
       return;
     }
@@ -1071,7 +1091,7 @@ export default function App() {
       if (info) {
         setAppInfo((prev) => ({ ...prev, ...info }));
       }
-    }).catch(() => {});
+    }).catch(() => { });
   }, [api]);
 
   const [windowMaximized, setWindowMaximized] = useState(false);
@@ -1079,7 +1099,7 @@ export default function App() {
     if (!api?.windowIsMaximized) return undefined;
     void api.windowIsMaximized().then((result) => {
       setWindowMaximized(Boolean(result?.maximized));
-    }).catch(() => {});
+    }).catch(() => { });
     if (!api.onWindowState) return undefined;
     return api.onWindowState((payload) => {
       setWindowMaximized(Boolean(payload?.maximized));
@@ -1148,25 +1168,41 @@ export default function App() {
     [workerOverview]
   );
   const policyEnforced = isRuntimePolicyEnforced(runtimePolicy);
-  const providerAllowedModels = useMemo(
-    () => (policyEnforced
-      ? [runtimePolicy.generation_model].filter(Boolean)
-      : getAllowedModelsForProvider(config.llmProvider || 'ollama')),
-    [config.llmProvider, policyEnforced, runtimePolicy]
-  );
   const selectedGenModel = String(config.genModel || config.model || '').trim();
-  const effectiveGenModel = providerAllowedModels.includes(selectedGenModel)
+  const providerAllowedModels = useMemo(
+    () => {
+      if (policyEnforced) {
+        return Array.from(new Set([
+          runtimePolicy?.generation_model,
+          ...(Array.isArray(runtimePolicy?.allowed_generation_models) ? runtimePolicy.allowed_generation_models : [])
+        ].filter((m) => Boolean(m && String(m).trim()))));
+      }
+      return availableModels.length > 0
+        ? availableModels
+        : (selectedGenModel ? [selectedGenModel] : []);
+    },
+    [policyEnforced, runtimePolicy, availableModels, selectedGenModel]
+  );
+  const effectiveGenModel = providerAllowedModels.some((m) => m.toLowerCase() === selectedGenModel.toLowerCase())
     ? selectedGenModel
-    : providerAllowedModels[0];
+    : (providerAllowedModels[0] || selectedGenModel);
 
   useEffect(() => {
-    if (policyEnforced) return;
-    if (selectedGenModel && providerAllowedModels.includes(selectedGenModel)) return;
+    if (selectedGenModel && providerAllowedModels.some((m) => m.toLowerCase() === selectedGenModel.toLowerCase())) return;
     const fallbackModel = providerAllowedModels[0];
     if (!fallbackModel) return;
     updateConfig('genModel', fallbackModel);
     updateConfig('model', fallbackModel);
-  }, [selectedGenModel, providerAllowedModels, policyEnforced]);
+  }, [selectedGenModel, providerAllowedModels]);
+
+  const hardwareTier = useMemo(() => {
+    const raw = runtimeCheck?.hardware_tier
+      || runtimePolicy?.hardware_tier
+      || runtimePolicy?.tier
+      || 1;
+    const n = Number(raw);
+    return Number.isFinite(n) && n > 0 ? n : 1;
+  }, [runtimeCheck?.hardware_tier, runtimePolicy?.hardware_tier, runtimePolicy?.tier]);
 
   const embedOptionIds = useMemo(
     () => (policyEnforced
@@ -1380,17 +1416,17 @@ export default function App() {
     ? 'STARTING'
     : uiState.phase === 'initializing'
       ? ''
-    : status?.running
-      ? 'STOP'
-      : canStart
-        ? 'START'
-        : uiState.actionTarget === 'app-token' || uiState.actionTarget === 'token'
-          ? (uiState.phase === 'token_invalid' ? 'REPLACE TOKEN' : 'PASTE TOKEN')
-          : uiState.actionTarget === 'runtime'
-            ? 'FIX RUNTIME'
-            : uiState.actionLabel
-              ? String(uiState.actionLabel).toUpperCase()
-              : '';
+      : status?.running
+        ? 'STOP'
+        : canStart
+          ? 'START'
+          : uiState.actionTarget === 'app-token' || uiState.actionTarget === 'token'
+            ? (uiState.phase === 'token_invalid' ? 'REPLACE TOKEN' : 'PASTE TOKEN')
+            : uiState.actionTarget === 'runtime'
+              ? 'FIX RUNTIME'
+              : uiState.actionLabel
+                ? String(uiState.actionLabel).toUpperCase()
+                : '';
   const protectionRows = useMemo(
     () =>
       buildWorkerProtectionRows({
@@ -1434,14 +1470,14 @@ export default function App() {
   const nextActionLine = startPending
     ? 'Next action: starting worker'
     : status?.running
-    ? (currentTask
-      ? `Next action: complete ${currentTask.type}`
-      : `Next action: keep ${providerLabel} running`)
-    : (!hasUsableToken
-      ? 'Next action: paste worker token'
-      : !modelReady
-        ? ''
-        : 'Next action: start worker');
+      ? (currentTask
+        ? `Next action: complete ${currentTask.type}`
+        : `Next action: keep ${providerLabel} running`)
+      : (!hasUsableToken
+        ? 'Next action: paste worker token'
+        : !modelReady
+          ? ''
+          : 'Next action: start worker');
 
   const activityContext = useMemo(() => ({
     hubState,
@@ -1549,6 +1585,13 @@ export default function App() {
         {policyEnforced ? (
           <div className="field-grid">
             <div className="runtime-policy-row">
+              <span className="runtime-policy-label">Hardware Tier</span>
+              <span className="runtime-policy-value">Tier {hardwareTier}</span>
+              <span className={`rail-badge tier-${hardwareTier}`}>
+                Tier {hardwareTier}
+              </span>
+            </div>
+            <div className="runtime-policy-row">
               <span className="runtime-policy-label">Provider</span>
               <span className="runtime-policy-value">{formatProviderLabel(runtimePolicy?.provider)}</span>
               <span className={`rail-badge ${String(config.llmProvider || '') === runtimePolicy?.provider ? 'is-ok' : 'is-bad'}`}>
@@ -1557,11 +1600,27 @@ export default function App() {
             </div>
             <div className="runtime-policy-row">
               <span className="runtime-policy-label">Generation</span>
-              <span className="runtime-policy-value" title={runtimePolicy?.generation_model}>{runtimePolicy?.generation_model}</span>
+              {providerAllowedModels.length > 1 ? (
+                <div style={{ flex: 1, minWidth: 0, marginRight: 8 }}>
+                  <CustomSelect
+                    id="policyGenModel"
+                    value={effectiveGenModel}
+                    options={providerAllowedModels.map((m) => ({ value: m, label: m }))}
+                    onChange={(val) => {
+                      updateConfig('genModel', val);
+                      updateConfig('model', val);
+                    }}
+                  />
+                </div>
+              ) : (
+                <span className="runtime-policy-value" title={effectiveGenModel || runtimePolicy?.generation_model}>
+                  {effectiveGenModel || runtimePolicy?.generation_model}
+                </span>
+              )}
               <button
                 type="button"
                 className="btn-link runtime-copy-btn"
-                onClick={() => void copyRuntimeModelId(runtimePolicy?.generation_model, 'Generation model id')}
+                onClick={() => void copyRuntimeModelId(effectiveGenModel || runtimePolicy?.generation_model, 'Generation model id')}
               >
                 Copy
               </button>
@@ -1570,7 +1629,7 @@ export default function App() {
               </span>
             </div>
             {runtimeCheck?.detectedGenerationModel
-              && runtimeCheck.detectedGenerationModel !== runtimePolicy?.generation_model ? (
+              && runtimeCheck.detectedGenerationModel !== (effectiveGenModel || runtimePolicy?.generation_model) ? (
               <p className="hint">Detected as: {runtimeCheck.detectedGenerationModel}</p>
             ) : null}
             <div className="runtime-policy-row">
@@ -1594,6 +1653,11 @@ export default function App() {
             {runtimePolicy?.runtime_policy_version ? (
               <p className="hint">Policy version: {runtimePolicy.runtime_policy_version} · mode: {runtimePolicy.mode}</p>
             ) : null}
+            {providerAllowedModels.length > 1 ? (
+              <p className="hint">
+                Approved models for Tier {hardwareTier}: {providerAllowedModels.join(', ')}
+              </p>
+            ) : null}
           </div>
         ) : (
           <div className="field-grid">
@@ -1608,9 +1672,9 @@ export default function App() {
                 ]}
                 onChange={(value) => {
                   updateConfig('llmProvider', value);
-                  const nextAllowed = getAllowedModelsForProvider(value);
+                  const nextAllowed = getAllowedModelsForProvider(value, runtimePolicy);
                   const currentModel = String(config.genModel || config.model || '').trim();
-                  if (!nextAllowed.includes(currentModel)) {
+                  if (nextAllowed.length > 0 && !nextAllowed.some((m) => m.toLowerCase() === currentModel.toLowerCase())) {
                     updateConfig('genModel', nextAllowed[0]);
                     updateConfig('model', nextAllowed[0]);
                   }
@@ -1769,6 +1833,9 @@ export default function App() {
         </div>
         {runtimeCheck ? (
           <div className="runtime-status-row mt-12">
+            <span className={`rail-badge tier-${hardwareTier}`}>
+              Tier {hardwareTier}
+            </span>
             {String(config?.llmProvider || 'ollama') === 'openai_compat' ? (
               <span className={`rail-badge ${runtimeCheck.openaiCompatReachable ? 'is-ok' : 'is-bad'}`}>
                 Endpoint {runtimeCheck.openaiCompatReachable ? 'connected' : 'offline'}
@@ -1869,9 +1936,8 @@ export default function App() {
                 />
               </label>
               <label
-                className={`app-setting-row app-setting-row-compact${
-                  minimizeToTrayOnClose ? '' : ' is-disabled'
-                }`}
+                className={`app-setting-row app-setting-row-compact${minimizeToTrayOnClose ? '' : ' is-disabled'
+                  }`}
               >
                 <span>
                   <strong>Show close-to-tray hint</strong>
@@ -2227,6 +2293,12 @@ export default function App() {
                     </button>
                     <div className="dash-hero-meta">
                       <span className={`rail-badge hub-status hub-${hubState}`}>{hubStateLabel(hubState, hubSuspension)}</span>
+                      <span
+                        className={`rail-badge tier-${hardwareTier}`}
+                        title={`Hardware Tier ${hardwareTier}`}
+                      >
+                        Tier {hardwareTier}
+                      </span>
                       <span className={`rail-badge ${modelReady ? 'is-ok' : 'is-pending'}`}>{runtimeReadyLabel}</span>
                       <span className={`rail-badge ${protectionBadge.className}`}>{protectionBadge.label}</span>
                       <span

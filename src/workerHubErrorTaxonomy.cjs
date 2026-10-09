@@ -77,15 +77,18 @@ function classifyWorkerApiError({ status, error, reason, code, message } = {}) {
   }
 
   if (
-    http === 409
+    (http === 409 || http === 423 || http === 0)
     && (
       codeText === 'worker_device_conflict'
       || codeText === 'worker_device_binding_active'
       || codeText === 'worker_device_id_required'
+      || codeText === 'worker_device_id_invalid'
       || combined.includes('worker_device_conflict')
+      || combined.includes('worker_device_binding_active')
+      || combined.includes('worker_device_id_required')
     )
   ) {
-    return 'hub_suspended';
+    return 'device_conflict';
   }
 
   if (
@@ -174,6 +177,12 @@ function parseWorkerStopReasonLine(line) {
 function inferHubStateFromWorkerSignal(line) {
   const parsedStop = parseWorkerStopReasonLine(line);
   if (parsedStop?.code) {
+    if (parsedStop.code === 'runtime_blocked') {
+      return 'hub_suspended_runtime_policy';
+    }
+    if (parsedStop.code === 'device_conflict') {
+      return 'hub_suspended_device_conflict';
+    }
     return parsedStop.code;
   }
 
@@ -181,6 +190,12 @@ function inferHubStateFromWorkerSignal(line) {
     error: line,
     message: line,
   });
+  if (classified === 'runtime_blocked') {
+    return 'hub_suspended_runtime_policy';
+  }
+  if (classified === 'device_conflict') {
+    return 'hub_suspended_device_conflict';
+  }
   return classified;
 }
 
@@ -188,6 +203,9 @@ function mapStopReasonToWorkerExitReason(code) {
   switch (String(code || '').trim()) {
     case 'token_invalid':
       return 'invalid_token';
+    case 'device_conflict':
+    case 'hub_suspended_device_conflict':
+      return 'device_conflict';
     case 'hub_suspended':
       return 'hub_suspended';
     case 'runtime_blocked':
@@ -205,7 +223,12 @@ function mapStopReasonToWorkerExitReason(code) {
 }
 
 function shouldFatalStopWorker(code) {
-  return code === 'token_invalid' || code === 'hub_suspended';
+  return (
+    code === 'token_invalid'
+    || code === 'hub_suspended'
+    || code === 'device_conflict'
+    || code === 'hub_suspended_device_conflict'
+  );
 }
 
 function isTokenInvalidHubState(code) {
@@ -222,6 +245,8 @@ function classifyHubAccessFailureFromApi(input) {
   switch (mapped) {
     case 'runtime_blocked':
       return 'hub_suspended_runtime_policy';
+    case 'device_conflict':
+      return 'hub_suspended_device_conflict';
     case 'duplicate_blocked':
     case 'throttled':
     case 'waiting':

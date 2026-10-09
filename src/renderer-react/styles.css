@@ -434,6 +434,24 @@ body {
   background: var(--bg-base);
 }
 
+.rail-badge.tier-1 {
+  color: #00e5ff;
+  border-color: rgba(0, 229, 255, 0.4);
+  background: rgba(0, 229, 255, 0.1);
+}
+
+.rail-badge.tier-2 {
+  color: #a855f7;
+  border-color: rgba(168, 85, 247, 0.4);
+  background: rgba(168, 85, 247, 0.1);
+}
+
+.rail-badge.tier-3 {
+  color: #eab308;
+  border-color: rgba(234, 179, 8, 0.4);
+  background: rgba(234, 179, 8, 0.1);
+}
+
 .rail-kv {
   margin: 0;
   display: grid;

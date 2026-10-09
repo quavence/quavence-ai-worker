@@ -84,6 +84,9 @@ export function mapSuspensionCodeToHubState(code) {
     case 'duplicate_task_attempt':
       return 'hub_suspended_duplicate_task';
     case 'device_conflict':
+    case 'worker_device_conflict':
+    case 'worker_device_binding_active':
+    case 'worker_device_id_required':
       return 'hub_suspended_device_conflict';
     case 'control_quality':
       return 'hub_suspended_control_quality';
@@ -123,11 +126,11 @@ export function resolveSuspensionPresentation(suspension = null) {
     case 'hub_suspended_device_conflict':
       return {
         hubState,
-        title: 'Suspended: device conflict',
-        subtitle: reason || 'Device binding conflict detected. Reset device binding on the Worker page.',
-        actionLabel: 'Open Worker page',
+        title: 'Device binding conflict',
+        subtitle: reason || 'Worker token is bound to another client (e.g. Quavence-Qt wallet) or device. Reset device binding on the Workers page.',
+        actionLabel: 'Reset on Workers page',
         actionTarget: 'open-external',
-        externalUrl: suspension?.action_url || null,
+        externalUrl: suspension?.action_url || 'https://quavence.com/dashboard/workers',
       };
     case 'hub_suspended_control_quality':
       return {
@@ -161,6 +164,9 @@ export function resolveSuspensionPresentation(suspension = null) {
 
 export function hubStateLabel(hubState, suspension = null) {
   if (suspension?.reason && isHubAccessBlocked(hubState)) {
+    if (hubState === 'hub_suspended_device_conflict') {
+      return 'Device binding conflict';
+    }
     if (hubState.startsWith('hub_suspended_')) {
       return resolveSuspensionPresentation(suspension).title.replace(/^Suspended:\s*/i, 'Suspended · ');
     }
@@ -176,7 +182,7 @@ export function hubStateLabel(hubState, suspension = null) {
     case 'hub_suspended_duplicate_task':
       return 'Suspended · duplicate task';
     case 'hub_suspended_device_conflict':
-      return 'Suspended · device conflict';
+      return 'Device binding conflict';
     case 'hub_suspended_control_quality':
       return 'Suspended · control quality';
     case 'hub_suspended_admin':
@@ -289,11 +295,16 @@ export function inferHubStateFromLogLine(line) {
   const parsedStop = parseWorkerStopReasonLine(raw);
   if (parsedStop?.code) {
     if (parsedStop.code === 'runtime_blocked') return 'hub_suspended_runtime_policy';
+    if (parsedStop.code === 'device_conflict') return 'hub_suspended_device_conflict';
     return parsedStop.code;
   }
 
   if (/worker access suspended|hub policy suspended|not active|auto_suspend/.test(text)) {
     return 'hub_suspended';
+  }
+
+  if (/worker_device_conflict|worker_device_binding_active|worker_device_id_required|worker_stop_reason code=device_conflict|bound to another device/.test(text)) {
+    return 'hub_suspended_device_conflict';
   }
 
   if (/task already completed|duplicate_task_attempt|duplicate blocked/.test(text)) {
@@ -310,6 +321,7 @@ export function inferHubStateFromLogLine(line) {
 
   const classified = classifyWorkerApiError({ error: raw, message: raw });
   if (classified === 'token_invalid') return 'token_invalid';
+  if (classified === 'device_conflict') return 'hub_suspended_device_conflict';
   if (classified === 'hub_suspended') return 'hub_suspended';
   if (classified === 'runtime_blocked') return 'hub_suspended_runtime_policy';
   if (classified === 'duplicate_blocked') return 'duplicate_blocked';

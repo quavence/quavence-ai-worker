@@ -132,14 +132,39 @@ async function fetchHubRuntimePolicy(apiUrl = DEFAULT_API_URL) {
   return null;
 }
 
+function isApprovedGenerationModel(policy, modelId) {
+  if (!modelId || !String(modelId).trim()) return false;
+  if (!policy) return false;
+  const m = String(modelId).trim();
+  const req = String(policy.generation_model || '').trim();
+  if (req && modelsMatchByPolicy(req, m)) return true;
+  const allowed = Array.isArray(policy.allowed_generation_models) ? policy.allowed_generation_models : [];
+  for (const candidate of allowed) {
+    const candStr = String(candidate || '').trim();
+    if (candStr && modelsMatchByPolicy(candStr, m)) return true;
+  }
+  return false;
+}
+
+function extractHardwareTier(policy) {
+  const val = Number(policy?.hardware_tier || policy?.tier || 1);
+  return Number.isFinite(val) && val > 0 ? val : 1;
+}
+
 function applyPolicyToConfig(config, policy) {
   const next = { ...(config || {}) };
   if (!policy?.enabled || policy.mode === 'off') {
     return next;
   }
   next.llmProvider = policy.provider;
-  next.genModel = policy.generation_model;
-  next.model = policy.generation_model;
+  const currentModel = String(next.genModel || next.model || '').trim();
+  if (currentModel && isApprovedGenerationModel(policy, currentModel)) {
+    next.genModel = currentModel;
+    next.model = currentModel;
+  } else {
+    next.genModel = policy.generation_model;
+    next.model = policy.generation_model;
+  }
   next.embedModel = policy.embedding_model;
   return next;
 }
@@ -184,7 +209,7 @@ function formatRuntimeMismatchLabels(codes) {
     .filter(Boolean);
 }
 
-function buildRuntimePolicyIssues(policy, { provider, generationOk, embeddingOk, reachable, availableIds } = {}) {
+function buildRuntimePolicyIssues(policy, { provider, generationOk, embeddingOk, reachable, availableIds, activeGenModel } = {}) {
   if (!policy?.enabled || policy.mode === 'off') return [];
   const issues = [];
   const providerLabel = String(provider || '').trim().toLowerCase() === 'ollama' ? 'Ollama' : 'LM Studio';
@@ -202,11 +227,14 @@ function buildRuntimePolicyIssues(policy, { provider, generationOk, embeddingOk,
     });
   }
   if (!generationOk) {
+    const targetModel = (activeGenModel && isApprovedGenerationModel(policy, activeGenModel))
+      ? activeGenModel
+      : policy.generation_model;
     issues.push({
       kind: 'generation',
-      message: `Load generation model ${policy.generation_model} in ${providerLabel}`,
-      required: policy.generation_model,
-      detected: resolveListedModelId(policy.generation_model, availableIds),
+      message: `Load generation model ${targetModel} in ${providerLabel}`,
+      required: targetModel,
+      detected: resolveListedModelId(targetModel, availableIds),
     });
   }
   if (!embeddingOk) {
@@ -235,6 +263,8 @@ module.exports = {
   normalizeApiUrl,
   fetchHubRuntimePolicy,
   applyPolicyToConfig,
+  isApprovedGenerationModel,
+  extractHardwareTier,
   exactModelListed,
   resolveListedModelId,
   buildRuntimePolicyIssues,
