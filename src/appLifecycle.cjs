@@ -47,6 +47,7 @@ function createAppLifecycleManager({
   saveConfig,
   startWorker,
   stopWorkerInternal,
+  sendStandbyBeacon,
   prepareRuntime,
   checkRuntime,
   fetchWorkerOverview,
@@ -321,6 +322,11 @@ function createAppLifecycleManager({
       clearTimeout(workerRestartTimer);
       workerRestartTimer = null;
     }
+    if (typeof sendStandbyBeacon === 'function') {
+      try {
+        await sendStandbyBeacon(cachedAppConfig, 'Worker stopped by user');
+      } catch {}
+    }
     stopWorkerInternal();
     if (activeTray) {
       activeTray.destroy();
@@ -431,7 +437,7 @@ function createAppLifecycleManager({
     }
 
     const text = raw.toLowerCase();
-    if (/worker_device_conflict|worker_device_binding_active|worker_device_id_required|worker_stop_reason code=device_conflict|bound to another device/.test(text)) {
+    if (/device_conflict|worker_device_conflict|worker_device_binding_active|worker_device_id_required|worker_device_id_invalid|bound to another device/.test(text)) {
       workerExitReason = 'device_conflict';
       return;
     }

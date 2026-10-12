@@ -77,16 +77,17 @@ function classifyWorkerApiError({ status, error, reason, code, message } = {}) {
   }
 
   if (
-    (http === 409 || http === 423 || http === 0)
-    && (
-      codeText === 'worker_device_conflict'
-      || codeText === 'worker_device_binding_active'
-      || codeText === 'worker_device_id_required'
-      || codeText === 'worker_device_id_invalid'
-      || combined.includes('worker_device_conflict')
-      || combined.includes('worker_device_binding_active')
-      || combined.includes('worker_device_id_required')
-    )
+    http === 423
+    || codeText === 'worker_device_conflict'
+    || codeText === 'worker_device_binding_active'
+    || codeText === 'worker_device_id_required'
+    || codeText === 'worker_device_id_invalid'
+    || codeText === 'device_conflict'
+    || combined.includes('worker_device_conflict')
+    || combined.includes('worker_device_binding_active')
+    || combined.includes('worker_device_id_required')
+    || combined.includes('worker_device_id_invalid')
+    || combined.includes('device_conflict')
   ) {
     return 'device_conflict';
   }
@@ -180,7 +181,7 @@ function inferHubStateFromWorkerSignal(line) {
     if (parsedStop.code === 'runtime_blocked') {
       return 'hub_suspended_runtime_policy';
     }
-    if (parsedStop.code === 'device_conflict') {
+    if (parsedStop.code === 'device_conflict' || parsedStop.code === 'hub_suspended_device_conflict') {
       return 'hub_suspended_device_conflict';
     }
     return parsedStop.code;

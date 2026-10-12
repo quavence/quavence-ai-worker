@@ -5,6 +5,7 @@ import https from 'node:https';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import {
   buildRuntimeAttestation,
@@ -130,18 +131,55 @@ function collectHardwareFingerprint() {
 
 const WORKER_HARDWARE_FINGERPRINT = String(process.env.AI_WORKER_HARDWARE_FINGERPRINT || '').trim() || collectHardwareFingerprint();
 
+function readQtWorkerDeviceIdFromRegistry() {
+  if (process.platform !== 'win32') return '';
+  try {
+    const stdout = execFileSync(
+      'reg.exe',
+      ['query', 'HKCU\\Software\\Quavence\\Quavence-Qt\\AIWorker', '/v', 'deviceId'],
+      {
+        timeout: 2000,
+        windowsHide: true,
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'ignore'],
+      }
+    );
+    const match = stdout.match(/deviceId\s+REG_\w+\s+([^\r\n]+)/i);
+    if (match && match[1]) {
+      const val = match[1].trim();
+      if (/^[0-9a-zA-Z_\-]{6,128}$/.test(val)) {
+        return val;
+      }
+    }
+  } catch {
+    // quiet fallback on missing key or non-zero exit
+  }
+  return '';
+}
+
 function loadOrCreateDeviceId() {
   const fromEnv = String(process.env.AI_WORKER_DEVICE_ID || '').trim();
-  if (fromEnv) return fromEnv;
+  if (fromEnv && /^[0-9a-zA-Z_\-]{6,128}$/.test(fromEnv)) return fromEnv;
 
   const storePath = getDeviceIdStorePath();
   try {
     const existing = String(fs.readFileSync(storePath, 'utf8') || '').trim();
-    if (/^[0-9a-f-]{36}$/i.test(existing)) {
+    if (/^[0-9a-zA-Z_\-]{6,128}$/.test(existing)) {
       return existing;
     }
   } catch {
-    // generate below
+    // check registry or generate below
+  }
+
+  const qtDeviceId = readQtWorkerDeviceIdFromRegistry();
+  if (qtDeviceId) {
+    try {
+      fs.mkdirSync(path.dirname(storePath), { recursive: true });
+      fs.writeFileSync(storePath, `${qtDeviceId}\n`, { encoding: 'utf8', mode: 0o600 });
+    } catch {
+      // still use qt device id
+    }
+    return qtDeviceId;
   }
 
   const generated = crypto.randomUUID();
@@ -311,13 +349,23 @@ function handleHubAccessSuspended(res, action) {
 }
 
 function isWorkerDeviceBindingError(res) {
-  const code = String(res?.data?.code || res?.data?.reason || '').trim();
-  return [
+  if (Number(res?.status) === 423) return true;
+  const code = String(res?.data?.code || res?.data?.reason || '').trim().toLowerCase();
+  if ([
     'worker_device_id_required',
     'worker_device_conflict',
     'worker_device_binding_active',
     'worker_device_id_invalid',
-  ].includes(code);
+    'device_conflict',
+  ].includes(code)) {
+    return true;
+  }
+  const errorText = String(res?.data?.error || '').toLowerCase();
+  return errorText.includes('worker_device_conflict')
+    || errorText.includes('worker_device_binding_active')
+    || errorText.includes('worker_device_id_required')
+    || errorText.includes('worker_device_id_invalid')
+    || errorText.includes('device_conflict');
 }
 
 function isTaskLeaseExpiredError(res) {
@@ -1887,8 +1935,36 @@ async function workerLoop() {
   }
 }
 
+async function sendStandbyReleaseBeacon() {
+  try {
+    const payload = {
+      device_id: WORKER_DEVICE_ID,
+      hardware_fingerprint: WORKER_HARDWARE_FINGERPRINT,
+      compute_ready: false,
+      reason: 'Worker stopped by user',
+    };
+    if (WORKER_QVNC_ADDRESS) payload.qvnc_address = WORKER_QVNC_ADDRESS;
+    if (WORKER_KEYPAIR?.publicKeyHex) payload.worker_pubkey = WORKER_KEYPAIR.publicKeyHex;
+    await requestJsonWithRetry(
+      requestJson,
+      'POST',
+      `${API_BASE_URL}/api/ai/nodes/heartbeat`,
+      {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${NODE_TOKEN}`,
+        'X-AI-Worker-Device-ID': WORKER_DEVICE_ID,
+        'X-AI-Worker-Hardware-Fingerprint': WORKER_HARDWARE_FINGERPRINT,
+      },
+      payload,
+      { timeoutMs: 2500, maxRetries: 1 }
+    );
+  } catch {
+    // Fail silently on network errors so exit never hangs or throws unhandled rejection
+  }
+}
+
 function wireSignals() {
-  const shutdown = () => {
+  const shutdown = async () => {
     if (stopRequested) return;
     stopRequested = true;
     if (heartbeatTimer) {
@@ -1896,10 +1972,18 @@ function wireSignals() {
       heartbeatTimer = null;
     }
     log('shutdown requested');
+    try {
+      await sendStandbyReleaseBeacon();
+    } catch {}
+    process.exit(0);
   };
 
-  process.on('SIGINT', shutdown);
-  process.on('SIGTERM', shutdown);
+  process.on('SIGINT', () => {
+    void shutdown();
+  });
+  process.on('SIGTERM', () => {
+    void shutdown();
+  });
 }
 
 function isTransientNetworkError(error) {
@@ -1972,6 +2056,9 @@ async function start() {
   }, HEARTBEAT_INTERVAL_MS);
 
   await workerLoop();
+  try {
+    await sendStandbyReleaseBeacon();
+  } catch {}
 }
 
 const isDirectRun = Boolean(
@@ -1989,3 +2076,10 @@ if (isDirectRun) {
     process.exit(1);
   });
 }
+
+export {
+  readQtWorkerDeviceIdFromRegistry,
+  loadOrCreateDeviceId,
+  sendStandbyReleaseBeacon,
+  isWorkerDeviceBindingError,
+};

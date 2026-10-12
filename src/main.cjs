@@ -1,4 +1,14 @@
-const { app, BrowserWindow, ipcMain, Tray, Menu, nativeImage, Notification, shell } = require('electron');
+const electron = require('electron');
+const {
+  app,
+  BrowserWindow,
+  ipcMain,
+  Tray,
+  Menu,
+  nativeImage,
+  Notification,
+  shell,
+} = typeof electron === 'object' && electron !== null ? electron : {};
 const { mergeLifecycleDefaults, createAppLifecycleManager } = require('./appLifecycle.cjs');
 const { isAllowedExternalUrl } = require('./externalUrlAllowlist.cjs');
 const { createWorkerStartGate } = require('./workerStartGate.cjs');
@@ -37,8 +47,10 @@ process.env.NO_PROXY = [process.env.NO_PROXY, 'localhost,127.0.0.1,::1,quavence.
   .join(',');
 
 // Reduce noisy Chromium SSL handshake logs in desktop console.
-app.commandLine.appendSwitch('log-level', '3');
-app.commandLine.appendSwitch('disable-logging');
+if (app?.commandLine) {
+  app.commandLine.appendSwitch('log-level', '3');
+  app.commandLine.appendSwitch('disable-logging');
+}
 
 let mainWindow = null;
 let lifecycle = null;
@@ -963,9 +975,67 @@ function resolveWorkerScript() {
   return path.join(resolveRepoRoot(), 'worker_desktop', 'agent', 'ai_worker_agent.mjs');
 }
 
+async function sendStandbyBeacon(config = null, reason = 'Worker stopped by user') {
+  let conf = config;
+  if (!conf) {
+    try {
+      conf = await loadConfig();
+    } catch {
+      conf = {};
+    }
+  }
+  const apiUrl = String(conf?.apiUrl || '').trim() || 'https://quavence.com';
+  const token = await resolveNodeToken(conf);
+  const deviceId = String(conf?.deviceId || ensureWorkerDeviceId(conf)).trim();
+  const fingerprint = String(buildHardwareFingerprint()).trim();
+
+  if (!apiUrl || !token || !deviceId) {
+    return;
+  }
+
+  sendLog('info', '[SYS] AI Worker stopped. Sending standby notification to Hub...');
+  try {
+    const res = await requestJson(
+      'POST',
+      `${apiUrl}/api/ai/nodes/heartbeat`,
+      {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+        'X-AI-Worker-Device-ID': deviceId,
+        'X-AI-Worker-Hardware-Fingerprint': fingerprint,
+      },
+      {
+        device_id: deviceId,
+        hardware_fingerprint: fingerprint,
+        compute_ready: false,
+        reason,
+      },
+      2500
+    );
+    if (res?.ok) {
+      sendLog('info', '[HUB] Hub notified: Node switched to standby mode.');
+    } else {
+      const errMessage = res?.data?.error || res?.data?.message || `HTTP ${res?.status || 'unknown'}`;
+      sendLog('warn', '[HUB] Standby notification failed: ' + errMessage);
+    }
+  } catch (err) {
+    sendLog('warn', '[HUB] Standby notification failed: ' + err.message);
+  }
+}
+
 function stopWorkerInternal() {
+  const tokenForBeacon = sessionNodeToken;
   sessionNodeToken = '';
   if (lifecycle) lifecycle.onWorkerStoppedByUser();
+  void (async () => {
+    try {
+      const cfg = await loadConfig().catch(() => ({}));
+      if (tokenForBeacon && !cfg.token) {
+        cfg.token = tokenForBeacon;
+      }
+      await sendStandbyBeacon(cfg, 'Worker stopped by user');
+    } catch {}
+  })();
   if (!workerProcess) return;
   try {
     workerProcess.kill('SIGTERM');
@@ -1974,6 +2044,7 @@ function initLifecycleManager() {
     saveConfig,
     startWorker,
     stopWorkerInternal,
+    sendStandbyBeacon,
     prepareRuntime,
     checkRuntime,
     fetchWorkerOverview,
@@ -2068,8 +2139,11 @@ function registerIpcHandlers() {
     if (lifecycle) {
       await lifecycle.quitAppFully();
     } else {
+      try {
+        await sendStandbyBeacon(null, 'Worker stopped by user');
+      } catch {}
       stopWorkerInternal();
-      app.quit();
+      app?.quit?.();
     }
     return { ok: true };
   });
@@ -2080,9 +2154,9 @@ function registerIpcHandlers() {
   });
 
   ipcMain.handle('app:get-info', async () => ({
-    name: app.getName(),
-    version: app.getVersion(),
-    electronVersion: process.versions.electron,
+    name: app?.getName ? app.getName() : 'Quavence AI Worker',
+    version: app?.getVersion ? app.getVersion() : '1.0.0',
+    electronVersion: process.versions.electron || '',
     platform: process.platform,
   }));
 
@@ -2112,7 +2186,9 @@ function registerIpcHandlers() {
     if (!isAllowedExternalUrl(target)) {
       return { ok: false, error: 'url_not_allowed' };
     }
-    await shell.openExternal(target);
+    if (shell?.openExternal) {
+      await shell.openExternal(target);
+    }
     return { ok: true };
   });
 
@@ -2139,23 +2215,50 @@ function registerIpcHandlers() {
   });
 }
 
-app.whenReady().then(async () => {
-  initLifecycleManager();
-  registerIpcHandlers();
-  createWindow();
-  try {
-    await lifecycle.init();
-  } catch (error) {
-    sendLog('error', `Lifecycle init failed: ${error?.message || String(error)}`);
-  }
-});
+let standbyBeaconSentOnQuit = false;
 
-app.on('before-quit', () => {
-  if (lifecycle) lifecycle.setQuitting(true);
-});
+if (app?.whenReady) {
+  app.whenReady().then(async () => {
+    initLifecycleManager();
+    registerIpcHandlers();
+    createWindow();
+    try {
+      await lifecycle.init();
+    } catch (error) {
+      sendLog('error', `Lifecycle init failed: ${error?.message || String(error)}`);
+    }
+  });
+}
 
-app.on('window-all-closed', () => {
-  if (lifecycle?.getIsQuitting()) return;
-  // Keep app alive in tray; worker continues unless explicitly quit.
-});
+if (app?.on) {
+  app.on('before-quit', (event) => {
+    if (lifecycle) lifecycle.setQuitting(true);
+    if (!standbyBeaconSentOnQuit && (workerProcess || workerState?.running || sessionNodeToken)) {
+      event.preventDefault();
+      standbyBeaconSentOnQuit = true;
+      void (async () => {
+        try {
+          await sendStandbyBeacon(null, 'Worker stopped by user');
+        } finally {
+          stopWorkerInternal();
+          app.quit();
+        }
+      })();
+    }
+  });
+
+  app.on('window-all-closed', () => {
+    if (lifecycle?.getIsQuitting()) return;
+    // Keep app alive in tray; worker continues unless explicitly quit.
+  });
+}
+
+if (typeof module !== 'undefined' && module.exports) {
+  module.exports = {
+    readQtWorkerDeviceIdFromRegistry,
+    ensureWorkerDeviceId,
+    sendStandbyBeacon,
+    stopWorkerInternal,
+  };
+}
 

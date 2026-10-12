@@ -80,17 +80,23 @@ export function isHubNormalIdleState(hubState) {
 export function mapSuspensionCodeToHubState(code) {
   switch (String(code || '').trim()) {
     case 'runtime_policy_mismatch':
+    case 'hub_suspended_runtime_policy':
       return 'hub_suspended_runtime_policy';
     case 'duplicate_task_attempt':
+    case 'hub_suspended_duplicate_task':
       return 'hub_suspended_duplicate_task';
     case 'device_conflict':
+    case 'hub_suspended_device_conflict':
     case 'worker_device_conflict':
     case 'worker_device_binding_active':
     case 'worker_device_id_required':
+    case 'worker_device_id_invalid':
       return 'hub_suspended_device_conflict';
     case 'control_quality':
+    case 'hub_suspended_control_quality':
       return 'hub_suspended_control_quality';
     case 'admin_suspended':
+    case 'hub_suspended_admin':
       return 'hub_suspended_admin';
     case 'token_revoked':
       return 'token_invalid';
@@ -99,9 +105,9 @@ export function mapSuspensionCodeToHubState(code) {
   }
 }
 
-export function resolveSuspensionPresentation(suspension = null) {
+export function resolveSuspensionPresentation(suspension = null, fallbackHubState = null) {
   const code = String(suspension?.code || '').trim();
-  const hubState = mapSuspensionCodeToHubState(code);
+  const hubState = code ? mapSuspensionCodeToHubState(code) : (fallbackHubState || 'hub_suspended');
   const reason = String(suspension?.reason || '').trim();
 
   switch (hubState) {
@@ -377,7 +383,7 @@ export function deriveWorkerUiState({
   }
 
   if (isHubAccessBlocked(hubState) && hubState.startsWith('hub_suspended')) {
-    const presentation = resolveSuspensionPresentation(suspension);
+    const presentation = resolveSuspensionPresentation(suspension, hubState);
     return {
       phase: presentation.hubState,
       title: presentation.title,

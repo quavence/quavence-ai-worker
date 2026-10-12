@@ -27,7 +27,7 @@ assert(
 const completedLine = `[12:02:00] task completed: ${taskId} ~$0.05 USD → 0.02 QVNC`;
 const completed = parseProgressEvent(completedLine);
 assert(
-  completed.label === 'Task completed · + $0.05 / ≈ 0.02 QVNC',
+  completed.label === 'Task completed · + 0.02 QVNC',
   'completed reward label should use compact product format',
 );
 

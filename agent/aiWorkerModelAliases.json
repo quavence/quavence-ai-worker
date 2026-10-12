@@ -86,6 +86,19 @@
     "qwen/qwen2.5:14b",
     "qwen2.5-14b-instruct-gguf"
   ],
+  "qwen/qwen2.5-coder-14b-instruct": [
+    "qwen/qwen2.5-coder-14b-instruct",
+    "qwen2.5-coder-14b-instruct",
+    "qwen/qwen2.5-coder-14b",
+    "qwen2.5-coder-14b",
+    "qwen2.5-coder:14b",
+    "qwen/qwen2.5-coder:14b",
+    "qwen2.5-coder:14b-instruct",
+    "qwen/qwen2.5-coder:14b-instruct",
+    "qwen2.5-coder:latest",
+    "qwen2.5-coder-14b-instruct-gguf",
+    "lmstudio-community/qwen2.5-coder-14b-instruct-gguf"
+  ],
   "meta-llama/llama-3.3-70b-instruct": [
     "meta-llama/llama-3.3-70b-instruct",
     "llama-3.3-70b-instruct",
