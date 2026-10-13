@@ -884,9 +884,45 @@ async function ensureOllamaRunning(config) {
   return { status: 'started', executable };
 }
 
+const OLLAMA_MODEL_NAME_REGEX = /^[a-zA-Z0-9_.-]+(:[a-zA-Z0-9_.-]+)?$/;
+const SHELL_METACHARS_REGEX = /[&;|`$]/;
+
+function validateOllamaModelName(rawModel) {
+  const model = String(rawModel || '').trim();
+  if (!model) {
+    return { ok: false, error: 'Model name cannot be empty' };
+  }
+  if (model.startsWith('-')) {
+    return {
+      ok: false,
+      error: `Invalid model name "${model}": leading hyphens are strictly rejected to prevent CLI argument injection`
+    };
+  }
+  if (SHELL_METACHARS_REGEX.test(model)) {
+    return {
+      ok: false,
+      error: `Invalid model name "${model}": shell metacharacters are forbidden`
+    };
+  }
+  if (!OLLAMA_MODEL_NAME_REGEX.test(model)) {
+    return {
+      ok: false,
+      error: `Invalid model name "${model}": must match strict regex ^[a-zA-Z0-9_.-]+(:[a-zA-Z0-9_.-]+)?$`
+    };
+  }
+  return { ok: true, model };
+}
+
 async function pullModelWithProgress(config, executable) {
+  const validation = validateOllamaModelName(config.model);
+  if (!validation.ok) {
+    sendLog('error', `[ollama pull rejected] ${validation.error}`);
+    return { ok: false, error: validation.error };
+  }
+  const targetModel = validation.model;
+
   return new Promise((resolve) => {
-    sendLog('info', `Pulling model ${config.model} (this can take several minutes)...`);
+    sendLog('info', `Pulling model ${targetModel} (this can take several minutes)...`);
     const stripAnsi = (value) =>
       String(value || '')
         .replace(/\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])/g, '')
@@ -901,7 +937,7 @@ async function pullModelWithProgress(config, executable) {
     let lastStdoutAt = 0;
     let lastStderrAt = 0;
 
-    const child = spawn(executable, ['pull', String(config.model || '').trim()], {
+    const child = spawn(executable, ['pull', targetModel], {
       windowsHide: true
     });
 
@@ -2259,6 +2295,7 @@ if (typeof module !== 'undefined' && module.exports) {
     ensureWorkerDeviceId,
     sendStandbyBeacon,
     stopWorkerInternal,
+    validateOllamaModelName,
   };
 }
 
