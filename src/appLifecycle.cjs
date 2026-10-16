@@ -45,6 +45,7 @@ function createAppLifecycleManager({
   getMainWindow,
   loadConfig,
   saveConfig,
+  clearStoredToken,
   startWorker,
   stopWorkerInternal,
   sendStandbyBeacon,
@@ -477,6 +478,20 @@ function createAppLifecycleManager({
   async function maybeRestartWorkerAfterExit(reason) {
     if (isQuitting || userStoppedWorker) return;
     if (reason === 'invalid_token') {
+      if (typeof clearStoredToken === 'function') {
+        try {
+          await clearStoredToken();
+        } catch (err) {
+          sendLog('warn', `Failed to clear stored token: ${err?.message || String(err)}`);
+        }
+      }
+      if (cachedAppConfig) {
+        cachedAppConfig.hasStoredToken = false;
+      }
+      safeSendToRenderer('token:invalidated', {
+        reason: 'invalid_node_token',
+        message: 'Saved token is invalid. Please enter a valid worker token.'
+      });
       sendLog('error', 'Worker stopped: invalid token. Replace token before restarting.');
       safeSendToRenderer('app:lifecycle', { type: 'worker_fatal', reason: 'invalid_token' });
       showMainWindow();
@@ -629,6 +644,20 @@ function createAppLifecycleManager({
         message: overview?.message,
       }) === 'token_invalid'
     ) {
+      if (typeof clearStoredToken === 'function') {
+        try {
+          await clearStoredToken();
+        } catch (err) {
+          sendLog('warn', `Failed to clear stored token: ${err?.message || String(err)}`);
+        }
+      }
+      if (cachedAppConfig) {
+        cachedAppConfig.hasStoredToken = false;
+      }
+      safeSendToRenderer('token:invalidated', {
+        reason: 'invalid_node_token',
+        message: 'Saved token is invalid. Please enter a valid worker token.'
+      });
       workerExitReason = 'invalid_token';
       sendLog('warn', 'Auto-start skipped: invalid worker token');
       showMainWindow();

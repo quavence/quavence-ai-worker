@@ -47,4 +47,9 @@ contextBridge.exposeInMainWorld('workerDesktop', {
     ipcRenderer.on('app:lifecycle', listener);
     return () => ipcRenderer.removeListener('app:lifecycle', listener);
   },
+  onTokenInvalidated: (handler) => {
+    const listener = (_event, payload) => handler(payload);
+    ipcRenderer.on('token:invalidated', listener);
+    return () => ipcRenderer.removeListener('token:invalidated', listener);
+  },
 });

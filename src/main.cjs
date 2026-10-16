@@ -2078,6 +2078,7 @@ function initLifecycleManager() {
     getMainWindow: () => mainWindow,
     loadConfig,
     saveConfig,
+    clearStoredToken,
     startWorker,
     stopWorkerInternal,
     sendStandbyBeacon,

@@ -964,6 +964,17 @@ export default function App() {
   }, [api, pushToast]);
 
   useEffect(() => {
+    if (!api?.onTokenInvalidated) return undefined;
+    const unsubscribe = api.onTokenInvalidated(() => {
+      setHubState('token_invalid');
+      setHasStoredToken(false);
+      setTokenReplaceMode(true);
+      setFocusTokenCard(true);
+    });
+    return unsubscribe;
+  }, [api]);
+
+  useEffect(() => {
     const prev = prevHubStateRef.current;
     if (prev === hubState) return;
     prevHubStateRef.current = hubState;
@@ -1882,7 +1893,7 @@ export default function App() {
   const minimizeToTrayOnClose = config.minimizeToTrayOnClose !== false;
   const showTrayUnavailableWarning = minimizeToTrayOnClose && trayStatus && !trayAvailable;
   const tokenEndpoint = config.apiUrl || 'https://quavence.com';
-  const showTokenInput = tokenReplaceMode || !hasStoredToken;
+  const showTokenInput = tokenReplaceMode || !hasStoredToken || hubState === 'token_invalid';
   const tokenCardInvalid = hubState === 'token_invalid';
 
   const appForm = (

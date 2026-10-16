@@ -4,7 +4,8 @@ node_modules/
 # Build and distribution artifacts
 dist/
 dist-renderer/
-release/
+release/*
+!release/SHA256SUMS.txt
 build/*
 !build/installer.nsh
 *.exe
