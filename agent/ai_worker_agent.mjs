@@ -105,31 +105,177 @@ function getDeviceIdStorePath() {
   return primary;
 }
 
-function collectHardwareFingerprint() {
-  const parts = [];
+let cachedLocalGpu = null;
+
+function detectLocalGpuHardware() {
+  if (cachedLocalGpu) return cachedLocalGpu;
+
+  if (process.env.AI_WORKER_GPU_PCI_BUS || process.env.AI_WORKER_GPU_MODEL) {
+    cachedLocalGpu = {
+      gpuName: String(process.env.AI_WORKER_GPU_MODEL || 'NONE').trim(),
+      vramMb: parseInt(process.env.AI_WORKER_GPU_VRAM, 10) || 0,
+      pciBusId: String(process.env.AI_WORKER_GPU_PCI_BUS || 'NONE').trim(),
+    };
+    return cachedLocalGpu;
+  }
+
   try {
-    parts.push(`platform:${os.platform()}:${os.arch()}`);
-    parts.push(`cpus:${os.cpus()?.[0]?.model || 'unknown'}:${os.cpus()?.length || 0}`);
-    parts.push(`mem:${Math.round(os.totalmem() / (1024 * 1024 * 1024))}GB`);
+    const nvidiaOutput = execFileSync(
+      'nvidia-smi',
+      ['--query-gpu=name,memory.total,pci.bus_id', '--format=csv,noheader,nounits'],
+      {
+        timeout: 1500,
+        windowsHide: true,
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'ignore'],
+      }
+    );
+
+    const lines = String(nvidiaOutput || '')
+      .split(/\r?\n/)
+      .map(line => line.trim())
+      .filter(Boolean);
+
+    if (lines.length > 0) {
+      let totalVram = 0;
+      let primaryGpuName = '';
+      let primaryPciBus = '';
+
+      for (let i = 0; i < lines.length; i++) {
+        const parts = lines[i].split(',').map(p => p.trim());
+        const name = parts[0] || 'NVIDIA GPU';
+        const vram = parseInt(parts[1], 10) || 0;
+        const pci = parts[2] || 'NONE';
+
+        totalVram += vram;
+        if (i === 0) {
+          primaryGpuName = name;
+          primaryPciBus = pci;
+        }
+      }
+
+      if (totalVram > 0 && primaryPciBus && primaryPciBus !== 'NONE') {
+        const gpuDisplayName = lines.length > 1 ? `${lines.length}x ${primaryGpuName}` : primaryGpuName;
+        cachedLocalGpu = {
+          gpuName: gpuDisplayName,
+          vramMb: totalVram,
+          pciBusId: primaryPciBus,
+        };
+        return cachedLocalGpu;
+      }
+    }
+  } catch {
+    // nvidia-smi failed or unavailable
+  }
+
+  try {
+    if (process.platform === 'win32') {
+      const wmicOutput = execFileSync(
+        'wmic',
+        ['path', 'win32_VideoController', 'get', 'Name,AdapterRAM', '/format:csv'],
+        {
+          timeout: 1500,
+          windowsHide: true,
+          encoding: 'utf8',
+          stdio: ['ignore', 'pipe', 'ignore'],
+        }
+      );
+      const rows = String(wmicOutput || '')
+        .split(/\r?\n/)
+        .map(r => r.trim())
+        .filter(Boolean);
+
+      for (const row of rows) {
+        const parts = row.split(',').map(p => p.trim());
+        if (parts.length >= 3 && parts[1] && parts[2]) {
+          const name = parts[2];
+          const rawBytes = parseInt(parts[1], 10);
+          if (rawBytes > 0) {
+            const vramMb = Math.round(rawBytes / (1024 * 1024));
+            if (vramMb >= 4096) {
+              cachedLocalGpu = {
+                gpuName: name,
+                vramMb,
+                pciBusId: '0000:01:00.0',
+              };
+              return cachedLocalGpu;
+            }
+          }
+        }
+      }
+    } else if (process.platform === 'linux') {
+      const lspciOutput = execFileSync(
+        'lspci',
+        [],
+        {
+          timeout: 1500,
+          encoding: 'utf8',
+          stdio: ['ignore', 'pipe', 'ignore'],
+        }
+      );
+      const vgaLine = String(lspciOutput || '')
+        .split('\n')
+        .find(l => /vga|3d controller/i.test(l));
+      if (vgaLine) {
+        const pciMatch = vgaLine.match(/^([0-9a-fA-F:.]+)\s+/);
+        const pciBus = pciMatch ? pciMatch[1] : '0000:01:00.0';
+        cachedLocalGpu = {
+          gpuName: vgaLine.slice(pciMatch ? pciMatch[0].length : 0).trim().slice(0, 128),
+          vramMb: 0,
+          pciBusId: pciBus,
+        };
+        return cachedLocalGpu;
+      }
+    }
+  } catch {
+    // Secondary fallback failed
+  }
+
+  cachedLocalGpu = {
+    gpuName: 'NONE',
+    vramMb: 0,
+    pciBusId: 'NONE',
+  };
+  return cachedLocalGpu;
+}
+
+function collectHardwareFingerprint(gpuInfo = null) {
+  const gpu = gpuInfo || detectLocalGpuHardware();
+  let foundMac = '';
+  try {
     const nets = os.networkInterfaces();
-    const macs = [];
     for (const name of Object.keys(nets || {})) {
       for (const net of nets[name] || []) {
         if (!net.internal && net.mac && net.mac !== '00:00:00:00:00:00') {
-          macs.push(net.mac.toLowerCase());
+          foundMac = net.mac.toLowerCase();
+          break;
         }
       }
-    }
-    if (macs.length) {
-      parts.push(`macs:${[...new Set(macs)].sort().join(',')}`);
+      if (foundMac) break;
     }
   } catch {
-    // fallback
+    // network interface query failed
   }
-  return crypto.createHash('sha256').update(parts.join('|') || 'fallback_hw').digest('hex');
+
+  const components = [
+    os.platform(),
+    os.arch(),
+    os.cpus()?.[0]?.model || 'unknown',
+    String(os.totalmem()),
+    foundMac || os.hostname() || 'quavence_node',
+    String(gpu?.pciBusId || 'NONE'),
+    String(gpu?.vramMb || 0),
+    String(gpu?.gpuName || 'NONE'),
+  ];
+
+  return crypto
+    .createHash('sha256')
+    .update(components.join('|'))
+    .digest('hex');
 }
 
-const WORKER_HARDWARE_FINGERPRINT = String(process.env.AI_WORKER_HARDWARE_FINGERPRINT || '').trim() || collectHardwareFingerprint();
+const WORKER_GPU_INFO = detectLocalGpuHardware();
+const WORKER_HARDWARE_FINGERPRINT = String(process.env.AI_WORKER_HARDWARE_FINGERPRINT || '').trim() || collectHardwareFingerprint(WORKER_GPU_INFO);
 
 function readQtWorkerDeviceIdFromRegistry() {
   if (process.platform !== 'win32') return '';
@@ -505,6 +651,9 @@ async function apiCall(method, pathName, body = null) {
         Authorization: `Bearer ${NODE_TOKEN}`,
         'X-AI-Worker-Device-ID': WORKER_DEVICE_ID,
         'X-AI-Worker-Hardware-Fingerprint': WORKER_HARDWARE_FINGERPRINT,
+        'X-AI-Worker-GPU-Model': WORKER_GPU_INFO.gpuName,
+        'X-AI-Worker-GPU-VRAM': String(WORKER_GPU_INFO.vramMb),
+        'X-AI-Worker-GPU-PCI-Bus': WORKER_GPU_INFO.pciBusId,
       },
       body,
       { timeoutMs: HUB_REQUEST_TIMEOUT_MS },
@@ -1193,7 +1342,7 @@ async function executeEmbeddingTask(task, options = {}) {
 }
 
 /**
- * Universal Dumb Runner: executes pre-assembled prompt received from Hub.
+ * Universal Worker Relay: executes pre-assembled prompt received from Hub.
  * The worker is a pure inference relay with zero client-side prompt stitching or schema dicts.
  */
 async function executeTask(task, options = {}) {
@@ -1378,6 +1527,9 @@ async function heartbeat() {
   const payload = {
     device_id: WORKER_DEVICE_ID,
     hardware_fingerprint: WORKER_HARDWARE_FINGERPRINT,
+    gpu_name: WORKER_GPU_INFO.gpuName,
+    vram_mb: WORKER_GPU_INFO.vramMb,
+    gpu_pci_bus_id: WORKER_GPU_INFO.pciBusId,
     capabilities: {
       streaming: true,
     },
@@ -1605,10 +1757,6 @@ async function completeTask(taskId, taskType, claimNonce, resultJson) {
     throw new Error('Missing claim nonce for secure submit');
   }
 
-  const submitIdempotencyKey = makeIdempotencyKey();
-  const submitTimestamp = Math.floor(Date.now() / 1000);
-  const submitSignature = buildSubmitSignature(NODE_TOKEN, taskId, claimNonce, submitTimestamp, resultJson);
-
   if (!hasRuntimeAttestation() && runtimePolicy) {
     try {
       const preferredModel = String(PREFERRED_GEN_MODEL || activeGenerationModel || '').trim();
@@ -1632,8 +1780,24 @@ async function completeTask(taskId, taskType, claimNonce, resultJson) {
     throw new Error('runtime_attestation_missing_on_complete');
   }
 
+  const challengeNonce = String(taskId).replace(/-/g, '').slice(0, 12);
+  const runtimeProof = crypto.createHmac('sha256', challengeNonce)
+    .update(String(WORKER_DEVICE_ID) + ':' + String(taskId))
+    .digest('hex');
+
+  const payloadResultJson = (typeof resultJson === 'object' && resultJson !== null)
+    ? { ...resultJson, runtime_proof: runtimeProof }
+    : resultJson;
+
+  const submitIdempotencyKey = makeIdempotencyKey();
+  const submitTimestamp = Math.floor(Date.now() / 1000);
+  // Canonical JSON and HMAC signature MUST be computed on finalized payloadResultJson (parity with Qt submitTaskResult)
+  const submitSignature = buildSubmitSignature(NODE_TOKEN, taskId, claimNonce, submitTimestamp, payloadResultJson);
+
   const res = await apiCall('POST', `/api/ai/nodes/tasks/${encodeURIComponent(taskId)}/complete`, {
-    result_json: resultJson,
+    result_json: payloadResultJson,
+    runtime_proof: runtimeProof,
+    output_tokens: resultJson?.output_tokens,
     claim_nonce: claimNonce,
     submit_timestamp: submitTimestamp,
     submit_idempotency_key: submitIdempotencyKey,
@@ -1761,11 +1925,19 @@ async function failTask(taskId, errorMessage, httpStatus = 0, explicitReasonCode
   const provider = LLM_PROVIDER;
   const model = LLM_PROVIDER === 'openai_compat' ? (activeGenerationModel || OPENAI_COMPAT_MODEL) : OLLAMA_MODEL;
 
+  const reportTimestamp = Math.floor(Date.now() / 1000);
+  const reportNonce = crypto.randomUUID().replace(/-/g, '');
+  const signaturePayload = `${taskId}.fail.${reportTimestamp}.${reportNonce}`;
+  const reportSignature = crypto.createHmac('sha256', String(NODE_TOKEN || '')).update(signaturePayload, 'utf8').digest('hex');
+
   const res = await apiCall('POST', `/api/ai/nodes/tasks/${encodeURIComponent(taskId)}/fail`, {
     error_message: String(errorMessage || 'Worker execution failed'),
     reason_code,
     provider,
     model,
+    report_timestamp: reportTimestamp,
+    report_nonce: reportNonce,
+    report_signature: reportSignature,
   });
 
   if (res.status === 429) {
@@ -2005,7 +2177,7 @@ async function start() {
 
   log('starting worker agent');
   log(`Device registered: ${shortDeviceId(WORKER_DEVICE_ID)}`);
-  log('runner_mode=generic_dumb_runner');
+  log('runner_mode=generic_worker_relay');
   if (LLM_PROVIDER === 'openai_compat') {
     log(
       `api=${API_BASE_URL}, provider=openai_compat, base=${normalizeOpenAICompatBaseUrl(OPENAI_COMPAT_BASE_URL)}, model=${OPENAI_COMPAT_MODEL}`

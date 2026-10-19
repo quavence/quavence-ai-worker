@@ -13,6 +13,10 @@ for (const fileName of files) {
   const target = path.join(root, 'agent', fileName);
 
   if (!fs.existsSync(source)) {
+    if (fs.existsSync(target)) {
+      console.log(`sync_composer_llm_service: upstream monorepo source not found, using bundled copy at ${path.relative(root, target)}`);
+      continue;
+    }
     throw new Error(`Missing composer LLM service source: ${source}`);
   }
 

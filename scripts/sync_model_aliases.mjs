@@ -7,6 +7,10 @@ const source = path.resolve(root, '..', 'src', 'config', 'aiWorkerModelAliases.j
 const target = path.join(root, 'agent', 'aiWorkerModelAliases.json');
 
 if (!fs.existsSync(source)) {
+  if (fs.existsSync(target)) {
+    console.log(`sync_model_aliases: upstream monorepo source not found, using bundled copy at ${path.relative(root, target)}`);
+    process.exit(0);
+  }
   throw new Error(`Missing model alias catalog source: ${source}`);
 }
 

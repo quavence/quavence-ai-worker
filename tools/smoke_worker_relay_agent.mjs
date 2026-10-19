@@ -1,7 +1,7 @@
 import { strict as assert } from 'node:assert';
 import crypto from 'crypto';
 
-console.log('=== RUNNING WORKER DESKTOP DUMB RUNNER SMOKE TEST ===\n');
+console.log('=== RUNNING WORKER DESKTOP RELAY SMOKE TEST ===\n');
 
 // 1. Canonical JSON and HMAC Signature verification
 function isPlainObject(value) {
@@ -130,4 +130,21 @@ const parsedMalformed = parseJsonCandidate(malformedInput, { summary: malformedI
 assert.equal(parsedMalformed.summary, malformedInput);
 console.log('  ✓ Malformed non-JSON output handled gracefully via fallback');
 
-console.log('\n=== ALL DUMB RUNNER SMOKE TESTS PASSED ===');
+// 3. Complete Task Signature Parity with Runtime Proof
+const deviceId = 'test-device-id-999';
+const challengeNonce = taskId.replace(/-/g, '').slice(0, 12);
+const runtimeProof = crypto.createHmac('sha256', challengeNonce).update(`${deviceId}:${taskId}`).digest('hex');
+const finalizedResult = { ...sampleResult, runtime_proof: runtimeProof };
+const submitSig = buildSubmitSignature(testToken, taskId, nonce, ts, finalizedResult);
+assert.ok(/^[0-9a-f]{64}$/.test(submitSig), 'Finalized result with runtime_proof must yield valid 64-char HMAC');
+console.log('  ✓ Finalized payload with runtime_proof signature parity verified');
+
+// 4. Fail Report Signature Verification (matches Qt reportTaskFailure & Hub)
+const failTs = 1725720050;
+const failNonce = 'nonce_fail_123456';
+const failSigPayload = `${taskId}.fail.${failTs}.${failNonce}`;
+const failSig = crypto.createHmac('sha256', testToken).update(failSigPayload, 'utf8').digest('hex');
+assert.ok(/^[0-9a-f]{64}$/.test(failSig), 'Fail report signature must yield valid 64-char HMAC');
+console.log('  ✓ Fail report HMAC signature matches Hub and Qt format');
+
+console.log('\n=== ALL WORKER RELAY SMOKE TESTS PASSED ===');

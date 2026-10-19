@@ -208,7 +208,7 @@ export async function fetchLmStudioModelContexts(baseUrl, apiKey = '', { bypassC
     for (const m of models) {
       const id = String(m?.id || '').trim();
       if (!id) continue;
-      // L-2: If loaded_context_length <= 0 or missing, fallback to safe default 8192 tokens.
+      // If loaded_context_length <= 0 or missing, fallback to safe default 8192 tokens.
       // A context value of 0 is never emitted to attestation.
       let ctx = Number(m?.loaded_context_length || m?.max_context_length || 0);
       if (!Number.isFinite(ctx) || ctx <= 0) ctx = 8192;
@@ -336,7 +336,7 @@ export async function verifyLocalRuntimeAgainstPolicy({
     };
   }
 
-  // Pure Dumb Runner & Tier Parity:
+  // Lightweight Worker Relay & Tier Parity:
   // 1. If preferredModel is provided and approved by policy, check if available
   let detectedGenerationModel = null;
   const preferred = String(preferredModel || '').trim();

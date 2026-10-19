@@ -117,7 +117,7 @@ console.log('\n--- TEST 3: buildRuntimeAttestation Context Clamping & Anti-Spoof
 
 console.log('\n--- TEST 4: LM Studio v0 Models Probe (Mock Server on Dynamic Port) ---');
 {
-  // Start mock HTTP server on dynamic port (listen(0) as per M-3)
+  // Start mock HTTP server on dynamic port (listen(0))
   const server = http.createServer((req, res) => {
     if (req.url === '/api/v0/models') {
       res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -196,7 +196,7 @@ console.log('\n--- TEST 6: Ollama probeOllamaModelDetails num_ctx Parsing ---');
   }
 }
 
-console.log('\n--- TEST 7: LM Studio Model Contexts TTL Caching (L-1) ---');
+console.log('\n--- TEST 7: LM Studio Model Contexts TTL Caching ---');
 {
   let hits = 0;
   const serverCache = http.createServer((req, res) => {
@@ -220,13 +220,13 @@ console.log('\n--- TEST 7: LM Studio Model Contexts TTL Caching (L-1) ---');
     assert.equal(res2.modelContextLengths['qwen3-8b'], 16384);
     assert.equal(hits, 1, 'Second call should use memory cache and not increment server hits');
 
-    console.log('✓ PASS: TTL caching prevents duplicate /api/v0/models calls (L-1 resolved)');
+    console.log('✓ PASS: TTL caching prevents duplicate /api/v0/models calls');
   } finally {
     serverCache.close();
   }
 }
 
-console.log('\n--- TEST 8: Zero Context Protection Guarantee (L-2) ---');
+console.log('\n--- TEST 8: Zero Context Protection Guarantee ---');
 {
   const attZero = buildRuntimeAttestation({ provider: 'openai_compat' }, { max_context_tokens: 0 });
   assert.equal(attZero.max_context_tokens, undefined, 'Context of 0 must be ignored, allowing Hub default');
@@ -234,7 +234,7 @@ console.log('\n--- TEST 8: Zero Context Protection Guarantee (L-2) ---');
   const attNegative = buildRuntimeAttestation({ provider: 'openai_compat' }, { max_context_tokens: -100 });
   assert.equal(attNegative.max_context_tokens, undefined, 'Negative context must be ignored');
 
-  console.log('✓ PASS: Zero and negative context protection verified (L-2 resolved)');
+  console.log('✓ PASS: Zero and negative context protection verified');
 }
 
 console.log('\n======================================================');

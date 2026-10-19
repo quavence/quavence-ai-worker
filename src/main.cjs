@@ -343,7 +343,137 @@ function getConfigPath() {
 
 const os = require('os');
 
-function buildHardwareFingerprint() {
+let cachedGpuTelemetry = null;
+
+function detectLocalGpuHardware() {
+  try {
+    // 1. Primary: nvidia-smi with bounded 1500ms timeout
+    const nvidiaOutput = execFileSync(
+      'nvidia-smi',
+      ['--query-gpu=name,memory.total,pci.bus_id', '--format=csv,noheader,nounits'],
+      {
+        timeout: 1500,
+        windowsHide: true,
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'ignore'],
+      }
+    );
+
+    const lines = String(nvidiaOutput || '')
+      .split(/\r?\n/)
+      .map(line => line.trim())
+      .filter(Boolean);
+
+    if (lines.length > 0) {
+      let totalVram = 0;
+      let primaryGpuName = '';
+      let primaryPciBus = '';
+
+      for (let i = 0; i < lines.length; i++) {
+        const parts = lines[i].split(',').map(p => p.trim());
+        const name = parts[0] || 'NVIDIA GPU';
+        const vram = parseInt(parts[1], 10) || 0;
+        const pci = parts[2] || 'NONE';
+
+        totalVram += vram;
+        if (i === 0) {
+          primaryGpuName = name;
+          primaryPciBus = pci;
+        }
+      }
+
+      if (totalVram > 0 && primaryPciBus && primaryPciBus !== 'NONE') {
+        const gpuDisplayName = lines.length > 1 ? `${lines.length}x ${primaryGpuName}` : primaryGpuName;
+        return {
+          gpuName: gpuDisplayName,
+          vramMb: totalVram,
+          pciBusId: primaryPciBus,
+        };
+      }
+    }
+  } catch {
+    // nvidia-smi unavailable or timed out, attempt OS-specific fallback
+  }
+
+  // 2. Secondary fallback for systems without nvidia-smi
+  try {
+    if (process.platform === 'win32') {
+      const wmicOutput = execFileSync(
+        'wmic',
+        ['path', 'win32_VideoController', 'get', 'Name,AdapterRAM', '/format:csv'],
+        {
+          timeout: 1500,
+          windowsHide: true,
+          encoding: 'utf8',
+          stdio: ['ignore', 'pipe', 'ignore'],
+        }
+      );
+      const rows = String(wmicOutput || '')
+        .split(/\r?\n/)
+        .map(r => r.trim())
+        .filter(Boolean);
+
+      for (const row of rows) {
+        const parts = row.split(',').map(p => p.trim());
+        if (parts.length >= 3 && parts[1] && parts[2]) {
+          const name = parts[2];
+          const rawBytes = parseInt(parts[1], 10);
+          if (rawBytes > 0) {
+            const vramMb = Math.round(rawBytes / (1024 * 1024));
+            if (vramMb >= 4096) {
+              return {
+                gpuName: name,
+                vramMb,
+                pciBusId: '0000:01:00.0',
+              };
+            }
+          }
+        }
+      }
+    } else if (process.platform === 'linux') {
+      const lspciOutput = execFileSync(
+        'lspci',
+        [],
+        {
+          timeout: 1500,
+          encoding: 'utf8',
+          stdio: ['ignore', 'pipe', 'ignore'],
+        }
+      );
+      const vgaLine = String(lspciOutput || '')
+        .split('\n')
+        .find(l => /vga|3d controller/i.test(l));
+      if (vgaLine) {
+        const pciMatch = vgaLine.match(/^([0-9a-fA-F:.]+)\s+/);
+        const pciBus = pciMatch ? pciMatch[1] : '0000:01:00.0';
+        return {
+          gpuName: vgaLine.slice(pciMatch ? pciMatch[0].length : 0).trim().slice(0, 128),
+          vramMb: 0,
+          pciBusId: pciBus,
+        };
+      }
+    }
+  } catch {
+    // Secondary fallback failed
+  }
+
+  // Deterministic fallback for non-GPU / CPU-only machines
+  return {
+    gpuName: 'NONE',
+    vramMb: 0,
+    pciBusId: 'NONE',
+  };
+}
+
+function getCachedGpuTelemetry() {
+  if (!cachedGpuTelemetry) {
+    cachedGpuTelemetry = detectLocalGpuHardware();
+  }
+  return cachedGpuTelemetry;
+}
+
+function buildHardwareFingerprint(gpuInfo = null) {
+  const gpu = gpuInfo || getCachedGpuTelemetry();
   const foundMac = Object.values(os.networkInterfaces() || {})
     .flat()
     .find(iface => iface && !iface.internal && iface.mac && iface.mac !== '00:00:00:00:00:00')
@@ -352,15 +482,18 @@ function buildHardwareFingerprint() {
   const components = [
     os.platform(),
     os.arch(),
-    os.cpus()?.[0]?.model || '',
+    os.cpus()?.[0]?.model || 'unknown',
     String(os.totalmem()),
     foundMac || os.hostname() || 'quavence_node',
+    String(gpu?.pciBusId || 'NONE'),
+    String(gpu?.vramMb || 0),
+    String(gpu?.gpuName || 'NONE'),
   ];
+
   return crypto
     .createHash('sha256')
-    .update(components.filter(Boolean).join('|'))
-    .digest('hex')
-    .slice(0, 32);
+    .update(components.join('|'))
+    .digest('hex');
 }
 
 function readQtWorkerDeviceIdFromRegistry() {
@@ -1022,8 +1155,9 @@ async function sendStandbyBeacon(config = null, reason = 'Worker stopped by user
   }
   const apiUrl = String(conf?.apiUrl || '').trim() || 'https://quavence.com';
   const token = await resolveNodeToken(conf);
-  const deviceId = String(conf?.deviceId || ensureWorkerDeviceId(conf)).trim();
-  const fingerprint = String(buildHardwareFingerprint()).trim();
+  const gpu = getCachedGpuTelemetry();
+  const fingerprint = String(buildHardwareFingerprint(gpu)).trim();
+  const deviceId = String(conf?.deviceId || '').trim() || ensureWorkerDeviceId(conf);
 
   if (!apiUrl || !token || !deviceId) {
     return;
@@ -1039,10 +1173,16 @@ async function sendStandbyBeacon(config = null, reason = 'Worker stopped by user
         Authorization: `Bearer ${token}`,
         'X-AI-Worker-Device-ID': deviceId,
         'X-AI-Worker-Hardware-Fingerprint': fingerprint,
+        'X-AI-Worker-GPU-Model': gpu.gpuName,
+        'X-AI-Worker-GPU-VRAM': String(gpu.vramMb),
+        'X-AI-Worker-GPU-PCI-Bus': gpu.pciBusId,
       },
       {
         device_id: deviceId,
         hardware_fingerprint: fingerprint,
+        gpu_name: gpu.gpuName,
+        vram_mb: gpu.vramMb,
+        gpu_pci_bus_id: gpu.pciBusId,
         compute_ready: false,
         reason,
       },
@@ -1888,7 +2028,10 @@ async function spawnWorkerProcess(config) {
     AI_NODE_API_URL: String(config.apiUrl || '').trim(),
     AI_NODE_TOKEN: runtimeToken,
     AI_WORKER_DEVICE_ID: String(config.deviceId || ensureWorkerDeviceId(config)).trim(),
-    AI_WORKER_HARDWARE_FINGERPRINT: String(buildHardwareFingerprint()).trim(),
+    AI_WORKER_HARDWARE_FINGERPRINT: String(buildHardwareFingerprint(getCachedGpuTelemetry())).trim(),
+    AI_WORKER_GPU_MODEL: String(getCachedGpuTelemetry().gpuName || 'NONE'),
+    AI_WORKER_GPU_VRAM: String(getCachedGpuTelemetry().vramMb || 0),
+    AI_WORKER_GPU_PCI_BUS: String(getCachedGpuTelemetry().pciBusId || 'NONE'),
     AI_WORKER_DEVICE_ID_FILE: path.join(app.getPath('userData'), 'ai-worker-device-id'),
     AI_WORKER_COUNTRY_CODE: String(config.countryCode || '').trim(),
     AI_WORKER_COUNTRY_NAME: String(config.countryName || '').trim(),
@@ -2192,7 +2335,7 @@ function registerIpcHandlers() {
 
   ipcMain.handle('app:get-info', async () => ({
     name: app?.getName ? app.getName() : 'Quavence AI Worker',
-    version: app?.getVersion ? app.getVersion() : '1.0.0',
+    version: app?.getVersion ? app.getVersion() : '1.1.0',
     electronVersion: process.versions.electron || '',
     platform: process.platform,
   }));

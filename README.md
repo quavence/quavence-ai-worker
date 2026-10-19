@@ -20,7 +20,7 @@ Connect your local LLM (Ollama or LM Studio) to participate in decentralized com
 
 For most users, simply download the latest installer from [GitHub Releases](https://github.com/quavence/quavence-ai-worker/releases):
 
-1. Download **`Quavence-AI-Worker-Setup-1.0.0.exe`**.
+1. Download **`Quavence-AI-Worker-Setup-1.1.0.exe`**.
 2. Run the installer and launch the application.
 3. Paste your Worker Token obtained from the Quavence Dashboard.
 4. Ensure your local Ollama or LM Studio is running, and click **Start Worker**.

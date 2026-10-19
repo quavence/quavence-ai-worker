@@ -2328,6 +2328,34 @@ export default function App() {
                         {pousBoostPercent > 0 ? `PoUS +${pousBoostPercent}%` : 'PoUS +0%'}
                       </span>
                     </div>
+                    {workerOverview?.staking?.is_downgraded ? (
+                      <div
+                        className="dash-hero-downgrade-banner"
+                        style={{
+                          background: 'rgba(234, 179, 8, 0.15)',
+                          border: '1px solid rgba(234, 179, 8, 0.4)',
+                          color: '#facc15',
+                          borderRadius: '8px',
+                          padding: '8px 14px',
+                          fontSize: '12px',
+                          fontWeight: '500',
+                          marginTop: '10px',
+                          marginBottom: '8px',
+                          display: 'flex',
+                          alignItems: 'center',
+                          gap: '8px',
+                        }}
+                      >
+                        <span style={{ fontSize: '14px' }}>⚠️</span>
+                        <span>
+                          {`Graceful Downgrade: Required ${
+                            workerOverview.staking.tier_thresholds?.[`tier${workerOverview.staking.current_tier}`] ?? (workerOverview.staking.current_tier === 3 ? 15 : 5)
+                          } QVNC for Tier ${workerOverview.staking.current_tier}, balance is ${
+                            workerOverview.staking.balance_qvnc
+                          } QVNC. Running in Tier ${workerOverview.staking.max_allowed_tier || 1}.`}
+                        </span>
+                      </div>
+                    ) : null}
                     <dl className="dash-hero-kv">
                       <div><dt>Token</dt><dd>{hasStoredToken ? 'Saved' : hasUsableToken ? 'Ready' : 'Missing'}</dd></div>
                       <div>

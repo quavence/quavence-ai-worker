@@ -1,2 +1,2 @@
-9daa0c136eb84fdd068c5bb81eeafb984cc30bbe2405930ff5da772aaadab928  Quavence-AI-Worker-Setup-1.0.9.exe
-6d09c667c0b460909ba0e5c7a089854c5dca2bec39d72ff013b0a65c00798000  Quavence-AI-Worker-Portable-1.0.9.exe
+e0c5c1a3840dffff161acee0fb0d5214868e43d73998d48ddbdc1eedb4f2b0f5  Quavence-AI-Worker-Setup-1.1.0.exe
+1d15064a27649636200c399b431ecd5669c4de108bdf191f06b3d3e94533f46f  Quavence-AI-Worker-Portable-1.1.0.exe
